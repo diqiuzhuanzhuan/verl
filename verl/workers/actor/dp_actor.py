@@ -269,7 +269,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid slient error
 
-        select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "old_log_probs", "advantages"]
+        select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "advantages"]
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
         if not self.config.use_gpg_loss:

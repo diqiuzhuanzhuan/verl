@@ -802,6 +802,7 @@ class RayPPOTrainer:
         local_global_step_folder = os.path.join(
             self.config.trainer.default_local_dir, f"global_step_{self.global_steps}"
         )
+        os.makedirs(local_global_step_folder, exist_ok=True)
 
         print(f"local_global_step_folder: {local_global_step_folder}")
         actor_local_path = os.path.join(local_global_step_folder, "actor")
