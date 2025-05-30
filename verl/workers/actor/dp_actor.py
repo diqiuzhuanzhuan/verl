@@ -311,7 +311,7 @@ class DataParallelPPOActor(BasePPOActor):
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
         multi_turn = data.meta_info.get("multi_turn", False)
 
-        select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "old_log_probs", "advantages"]
+        select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "advantages"]
         if multi_turn:
             select_keys.append("loss_mask")
         if self.config.use_kl_loss:
@@ -363,7 +363,6 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         response_mask = attention_mask[:, -response_length:]
 
-                    old_log_prob = data["old_log_probs"]
                     advantages = data["advantages"]
                     if not self.config.use_gpg_loss:
                         old_log_prob = data["old_log_probs"]
