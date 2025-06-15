@@ -13,11 +13,16 @@
 # limitations under the License.
 
 import argparse
+import io
 import os
 
 import datasets
+from PIL import Image
 
 from verl.utils.hdfs_io import copy, makedirs
+
+Image.MAX_IMAGE_PIXELS = None
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -138,10 +143,6 @@ if __name__ == "__main__":
 
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
-        import io  # 导入 io 模块用于处理字节流
-
-        from PIL import Image  # 导入 Pillow 库
-
         # 修正 maximum_size 和 max_pixels 的定义，确保它们是整数而不是元组
         maximum_size: int = 20 * 1024 * 1024  # 20MB
         max_pixels: int = 178956970
