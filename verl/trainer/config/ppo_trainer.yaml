@@ -280,6 +280,11 @@ actor_rollout_ref:
         # Minimum number of parameters to trigger wrapping a layer with FSDP
         min_num_params: 0
 
+        # Whether to wrap the model with FSDP
+        transformer_layer_cls_to_wrap: []
+
+      model_dtype: bfloat16
+
       # Whether to offload model parameters to CPU (trades speed for memory)
       param_offload: false
 
@@ -337,6 +342,9 @@ actor_rollout_ref:
 
         # minimum number of params in a wrapped module
         min_num_params: 0
+
+        # Whether to wrap the model with FSDP
+        transformer_layer_cls_to_wrap: []
 
     # whether to enable torch.compile
     use_torch_compile: ${actor_rollout_ref.actor.use_torch_compile}
@@ -622,6 +630,9 @@ critic:
         # Minimum number of parameters to trigger wrapping
         min_num_params: 0
 
+        # Whether to wrap the model with FSDP
+        transformer_layer_cls_to_wrap: []
+
       # Number of GPUs in each FSDP shard group; -1 means auto
       fsdp_size: -1
 
@@ -749,6 +760,9 @@ reward_model:
 
         # Minimum number of parameters to trigger wrapping
         min_num_params: 0
+        
+        # Whether to wrap the model with FSDP
+        transformer_layer_cls_to_wrap: []
 
       # Whether to offload model parameters to CPU
       param_offload: False

@@ -19,12 +19,13 @@ import logging
 import os
 import re
 from collections import defaultdict
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 import datasets
 import numpy as np
 import torch
 from omegaconf import DictConfig, ListConfig
+from PIL import Image
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
@@ -34,6 +35,94 @@ from verl.utils.model import compute_position_id_with_mask
 logger = logging.getLogger(__name__)
 
 
+def resize_image(img: Image.Image, target_size: Union[int, Tuple[int, int]], resample=Image.LANCZOS) -> Image.Image:
+    """
+    Resizes a PIL Image to a target size.
+
+    Args:
+        img: The input PIL Image.
+        target_size: The desired output size. Can be an integer (for square resizing)
+                     or a tuple (width, height).
+        resample: The resampling filter to use (e.g., Image.NEAREST, Image.BILINEAR,
+                  Image.BICUBIC, Image.LANCZOS). LANCZOS is generally good quality.
+
+    Returns:
+        The resized PIL Image.
+    """
+    if isinstance(target_size, int):
+        # If target_size is an integer, resize to a square
+        size = (target_size, target_size)
+    elif isinstance(target_size, tuple) and len(target_size) == 2:
+        # If target_size is a tuple (width, height)
+        size = target_size
+    else:
+        raise ValueError("target_size must be an integer or a tuple of two integers (width, height)")
+
+    # Perform the resize operation
+    resized_img = img.resize(size, resample=resample)
+
+    return resized_img
+
+
+def _pad_for_batching(
+    pixel_values: List[torch.Tensor],
+    image_sizes: List[List[int]],
+):
+    """
+    Pads images on the `num_of_patches` dimension with zeros to form a batch of same number of patches.
+    Args:
+        pixel_values (`List[torch.Tensor]`):
+            An array of pixel values of each images of shape (`batch_size`, `channels`, `height`, `width`)
+        image_sizes (`List[List[int]]`):
+            A list of sizes for each image in `pixel_values` in (height, width) format.
+    Returns:
+        List[`torch.Tensor`]: The padded images.
+    """
+    max_shape = (max([size[0] for size in image_sizes]), max([size[1] for size in image_sizes]))
+    pixel_values = [torch.nn.functional.pad(image, pad=(0, max_shape[1] - size[1], 0, max_shape[0] - size[0])).unsqueeze(0) for image, size in zip(pixel_values, image_sizes)]
+    return pixel_values
+
+
+#    return torch.stack(pixel_values)
+
+
+COLLATE_FN_MANAGER_REGISTRY = {}
+
+
+def register_collate_fn(name):
+    """Decorator to register a reward manager class with a given name.
+
+    Args:
+        name: `(str)`
+            The name of the reward manager.
+    """
+
+    def decorator(cls):
+        if name in COLLATE_FN_MANAGER_REGISTRY and COLLATE_FN_MANAGER_REGISTRY[name] != cls:
+            raise ValueError(f"Collate function manager {name} has already been registered: {COLLATE_FN_MANAGER_REGISTRY[name]} vs {cls}")
+        COLLATE_FN_MANAGER_REGISTRY[name] = cls
+        return cls
+
+    return decorator
+
+
+def get_collate_fn_manager_cls(name):
+    """Get the collate function manager class with a given name.
+
+    Args:
+        name: `(str)`
+            The name of the collate function manager.
+
+    Returns:
+        `(type)`: The collate function manager class.
+    """
+    if name not in COLLATE_FN_MANAGER_REGISTRY:
+        raise ValueError(f"Unknown collate function manager: {name}")
+    print("we get collate function manager: ", name)
+    return COLLATE_FN_MANAGER_REGISTRY[name]
+
+
+@register_collate_fn("default")
 def collate_fn(data_list: list[dict]) -> dict:
     """
     Collate a batch of sample dicts into batched tensors and arrays.
@@ -60,6 +149,47 @@ def collate_fn(data_list: list[dict]) -> dict:
         tensors[key] = torch.stack(val, dim=0)
 
     for key, val in non_tensors.items():
+        non_tensors[key] = np.array(val, dtype=object)
+
+    return {**tensors, **non_tensors}
+
+
+@register_collate_fn("PixtralProcessor")
+def collate_fn_for_pixtral(data_list: list[dict]) -> dict:
+    """
+    Collate a batch of sample dicts into batched tensors and arrays.
+
+    Args:
+        data_list: List of dicts mapping feature names to torch.Tensor or other values.
+
+    Returns:
+        Dict where tensor entries are stacked into a torch.Tensor of shape
+        (batch_size, *dims) and non-tensor entries are converted to
+        np.ndarray of dtype object with shape (batch_size,).
+    """
+    tensors = defaultdict(list)
+    non_tensors = defaultdict(list)
+
+    for data in data_list:
+        for key, val in data.items():
+            if isinstance(val, torch.Tensor):
+                tensors[key].append(val)
+            else:
+                non_tensors[key].append(val)
+
+    for key, val in tensors.items():
+        tensors[key] = torch.stack(val, dim=0)
+
+    for key, val in non_tensors.items():
+        if key == "multi_modal_inputs":
+            val = [ele for ele in val if ele]
+            if not val:
+                continue
+            pixel_values = [v["pixel_values"][0] for v in val]
+            image_sizes = [v["image_sizes"][0] for v in val]
+            pixel_values = _pad_for_batching(pixel_values, image_sizes)
+            for v, pixel_value in zip(val, pixel_values):
+                v["pixel_values"] = pixel_value
         non_tensors[key] = np.array(val, dtype=object)
 
     return {**tensors, **non_tensors}
@@ -316,3 +446,41 @@ class RLHFDataset(Dataset):
             return state
 
         return self.__dict__.copy()
+
+
+if __name__ == "__main__":
+    from verl.utils.tokenizer import hf_processor, hf_tokenizer
+
+    model_name = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+    # model_name = "Qwen/Qwen2.5-VL-7B-Instruct"
+    tokenizer = hf_tokenizer(model_name)
+    processor = hf_processor(model_name)
+    from verl.utils.dataset.rl_dataset import get_collate_fn_manager_cls
+
+    if processor:
+        collate_fn = get_collate_fn_manager_cls(processor.__class__.__name__)
+    else:
+        collate_fn = get_collate_fn_manager_cls("default")
+    rlhf_dataset = RLHFDataset(
+        data_files="/data/share8/ml/data/geo3k/train.parquet",
+        tokenizer=tokenizer,
+        config={"filter_overlong_prompts": False, "max_prompt_length": 8096},
+        processor=processor,
+    )
+    from torchdata.stateful_dataloader import StatefulDataLoader
+
+    dataloader = StatefulDataLoader(
+        dataset=rlhf_dataset,
+        batch_size=128,
+        num_workers=1,
+        drop_last=True,
+        collate_fn=collate_fn,
+    )
+    for ele in dataloader:
+        print(ele)
+        # print(ele['multi_modal_inputs']['image_grid_thw'])
+
+    # for ele in rlhf_dataset:
+    #    print(ele['multi_modal_inputs']['pixel_values'].shape)
+    #    print(ele['multi_modal_inputs']['image_sizes'])
+    # print(ele['mk klti_modal_inputs']['image_grid_thw'])

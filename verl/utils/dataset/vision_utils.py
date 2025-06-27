@@ -13,11 +13,40 @@
 # limitations under the License.
 
 from io import BytesIO
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 import torch
 from PIL import Image
 from qwen_vl_utils import fetch_image, fetch_video
+
+
+def resize_image(img: Image.Image, target_size: Union[int, Tuple[int, int]], resample=Image.LANCZOS) -> Image.Image:
+    """
+    Resizes a PIL Image to a target size.
+
+    Args:
+        img: The input PIL Image.
+        target_size: The desired output size. Can be an integer (for square resizing)
+                     or a tuple (width, height).
+        resample: The resampling filter to use (e.g., Image.NEAREST, Image.BILINEAR,
+                  Image.BICUBIC, Image.LANCZOS). LANCZOS is generally good quality.
+
+    Returns:
+        The resized PIL Image.
+    """
+    if isinstance(target_size, int):
+        # If target_size is an integer, resize to a square
+        size = (target_size, target_size)
+    elif isinstance(target_size, tuple) and len(target_size) == 2:
+        # If target_size is a tuple (width, height)
+        size = target_size
+    else:
+        raise ValueError("target_size must be an integer or a tuple of two integers (width, height)")
+
+    # Perform the resize operation
+    resized_img = img.resize(size, resample=resample)
+
+    return resized_img
 
 
 def process_image(image: Union[dict, Image.Image]) -> Image.Image:
