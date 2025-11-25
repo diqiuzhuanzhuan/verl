@@ -13,17 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
+
+
+class OpenAITypeSchema(BaseModel):
+    type: str
 
 
 class OpenAIFunctionPropertySchema(BaseModel):
     """The schema of a parameter in OpenAI format."""
 
-    type: str
+    type: Optional[str] = None
+    anyOf: Optional[list[OpenAITypeSchema]] = None
     description: str | None = None
     enum: list[str] | None = None
+
+    def model_validate(self, *args, **kwargs) -> "OpenAIFunctionPropertySchema":
+        obj = super().model_validate(*args, **kwargs)
+        if obj.type is None and obj.anyOf is None:
+            raise ValueError("Either type or anyOf must be provided")
+        return obj
 
 
 class OpenAIFunctionParametersSchema(BaseModel):
