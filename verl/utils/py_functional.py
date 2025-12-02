@@ -15,6 +15,7 @@
 Contain small python utility functions
 """
 
+import asyncio
 import importlib
 import multiprocessing
 import os
@@ -316,3 +317,39 @@ def convert_to_regular_types(obj):
     elif isinstance(obj, dict):
         return {k: convert_to_regular_types(v) for k, v in obj.items()}
     return obj
+
+
+def run_async_in_new_loop(func):
+    """
+    Decorator to run async code inside a new event loop,
+    safely handling nested & thread-local loops.
+    """
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # Create a dedicated loop for this sync call
+        new_loop = asyncio.new_event_loop()
+        try:
+            try:
+                prev_loop = asyncio.get_event_loop()
+            except RuntimeError:
+                prev_loop = None
+
+            asyncio.set_event_loop(new_loop)
+
+            coro = func(*args, **kwargs)
+            if asyncio.iscoroutine(coro):
+                result = new_loop.run_until_complete(coro)
+            else:
+                result = coro
+
+        finally:
+            new_loop.close()
+            try:
+                asyncio.set_event_loop(prev_loop)
+            except Exception:
+                pass
+
+        return result
+
+    return wrapper
