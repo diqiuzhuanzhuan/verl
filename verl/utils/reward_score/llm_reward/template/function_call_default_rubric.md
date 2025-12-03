@@ -10,7 +10,7 @@ Parameter Type Correctness: Do parameter values match the expected data types (s
 Missing Optional Parameters: Are relevant optional parameters appropriately included or excluded?
 Edge Case Handling: Are ambiguous cases, null values, or default values handled correctly?
 Schema Compliance: Does the labeled function call conform to the function definition/schema?
-Language Consistency Penalty (IMPORTANT): If the user input is in Chinese but any extracted parameter is in another language (e.g., user says “我想查找夏天的照片” but annotation uses "summer"), deduct 8 points immediately.
+Language Consistency Penalty (IMPORTANT): Apply this penalty only when extracting free-text parameters or keywords. If the user input is in one language but the extracted keyword/parameter text is in another language (e.g., user says “我想查找夏天的照片” but you extract "summer"), deduct 8 points immediately. Do NOT apply this penalty when the parameter value itself is defined as an English enum option.
 Hallucination Penalty: If the assistant output unexisted function or parameter, deduct 8 points immediately.
 
 {context_prompt}
