@@ -25,6 +25,7 @@ from typing import Any
 import datasets
 from fastmcp import Client
 from fastmcp.tools import Tool
+from rich import pretty
 
 from verl.utils.hdfs_io import copy, makedirs
 
@@ -60,8 +61,11 @@ if __name__ == "__main__":
     parser.add_argument("--local_dataset_path", default=None, help="The local path to the raw dataset, if it exists.")
     parser.add_argument("--mcp_server_url", default="http://127.0.0.1:8000/mcp", help="The URL of the MCP server.")
     parser.add_argument("--judge_model", default=None, help="The model to use for judging the responses.")
+    parser.add_argument("--debug", action="store_true", help="Whether to run in debug mode.")
     parser.add_argument(
-        "--local_save_dir", default="~/data/ugreen/tool_query", help="The save directory for the preprocessed dataset."
+        "--local_save_dir",
+        default="~/data/ugreen_function_call",
+        help="The save directory for the preprocessed dataset.",
     )
 
     args = parser.parse_args()
@@ -69,23 +73,28 @@ if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     mcp_tools = loop.run_until_complete(get_mcp_tools(mcp_cfg=mcp_config))
     openai_format_tools = convert_to_openai_tools(mcp_tools)
+    if args.debug:
+        print("#### MCP tools ####")
+        pretty.pprint(openai_format_tools)
 
     local_dataset_path = args.local_dataset_path
 
     data_source = "ugreen/tool_query"
 
     if local_dataset_path is not None:
-        dataset = datasets.load_dataset(local_dataset_path, "main")
+        dataset = datasets.load_dataset(local_dataset_path, "default")
     else:
-        dataset = datasets.load_dataset(data_source, "main")
+        dataset = datasets.load_dataset(data_source, "default")
 
+    if "test" not in dataset:
+        dataset = dataset["train"].train_test_split(test_size=0.1, seed=42)
     train_dataset = dataset["train"]
     test_dataset = dataset["test"]
 
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
         def process_fn(example, idx):
-            question = example.pop("question")
+            question = example.pop("query")
 
             data = {
                 "data_source": data_source,
