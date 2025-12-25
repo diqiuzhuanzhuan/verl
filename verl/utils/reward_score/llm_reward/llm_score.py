@@ -24,11 +24,15 @@ scores within each group.
 For detailed documentation and examples, see: https://art.openpipe.ai/fundamentals/ruler
 """
 
+import asyncio
 import json
 import os
+import re
+from itertools import chain
 from pathlib import Path
 from textwrap import dedent
 
+import torch
 from openai import AsyncOpenAI, OpenAI
 from openai.types.chat import ChatCompletion
 from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
@@ -43,13 +47,18 @@ class TrajectoryScore(BaseModel):
 
     trajectory_id: str = Field(description="The id of the trajectory being scored.")
     explanation: str = Field(description="A short description of the trajectory's performance.")
-    score: float = Field(description="A score between 0 and 1.")
+    score: float = Field(description="A score between 0 and 1.", default=0.0)
 
 
 class Response(BaseModel):
     """Response format expected from the LLM judge."""
 
     scores: list[TrajectoryScore] = Field(description="The scores for each trajectory.")
+
+
+def remove_think_tags(text: str) -> str:
+    """Remove <think>...</think> spans so they do not pollute outputs."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
 
 
 with open(Path(__file__).parent / "template" / Path("function_call_default_rubric.md")) as f:
@@ -126,13 +135,15 @@ async def aruler(
     user_text = ""
     if common_prefix_len > 0:
         common_prefix_messages = message_lists[0][:common_prefix_len]
-        user_text += "<context>\n" + json.dumps(common_prefix_messages) + "\n</context>\n\n"
+        user_text += "<context>\n" + json.dumps(common_prefix_messages, ensure_ascii=False) + "\n</context>\n\n"
 
     # Serialize each trajectory (minus the common prefix) for the judge.
     serialized_trajectories: list[str] = []
     for idx, full_messages in enumerate(message_lists, start=1):
         trimmed_messages = full_messages[common_prefix_len:]
-        serialized_trajectories.append(f'<trajectory id="{idx}">\n' + json.dumps(trimmed_messages) + "\n</trajectory>")
+        serialized_trajectories.append(
+            f'<trajectory id="{idx}">\n' + json.dumps(trimmed_messages, ensure_ascii=False) + "\n</trajectory>"
+        )
 
     user_text += "Trajectories:\n\n" + "\n\n".join(serialized_trajectories)
 
@@ -151,18 +162,23 @@ async def aruler(
         {"role": "system", "content": judge_prompt},
         {"role": "user", "content": user_text},
     ]
+    print(messages)
 
     client = AsyncOpenAI(
         api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     )
-
-    response = await client.chat.completions.parse(
-        model=judge_model,
-        messages=messages,
-        max_completion_tokens=4096,
-        response_format=Response,
-        **extra_params if extra_params else {},
-    )
+    try:
+        response = await client.chat.completions.parse(
+            model=judge_model,
+            messages=messages,
+            max_completion_tokens=4096,
+            response_format=Response,
+            **extra_params if extra_params else {},
+        )
+    except Exception as e:
+        print(f"Error in RULER: {e}")
+        if debug:
+            print(f"Messages: {messages}")
 
     assert isinstance(response, ChatCompletion)
 
@@ -182,7 +198,7 @@ async def aruler(
     content = first_choice.message.content or "{}"  # type: ignore[attr-defined]
     parsed = Response.model_validate_json(content)
     assert len(parsed.scores) == len(message_lists)
-
+    print("score: ", parsed.scores)
     return parsed.scores
 
 
@@ -285,13 +301,18 @@ def ruler(
         api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     )
 
-    response = client.chat.completions.parse(
-        model=judge_model,
-        messages=messages,
-        max_completion_tokens=4096,
-        response_format=Response,
-        **extra_params if extra_params else {},
-    )
+    try:
+        response = client.chat.completions.parse(
+            model=judge_model,
+            messages=messages,
+            max_completion_tokens=4096,
+            response_format=Response,
+            **extra_params if extra_params else {},
+        )
+    except Exception as e:
+        print(f"Error in RULER: {e}")
+        if debug:
+            print(f"Messages: {messages}")
 
     assert isinstance(response, ChatCompletion)
 
@@ -323,34 +344,49 @@ def render_rubric(template: str, context_prompt: str) -> str:
     return template.replace("{context_prompt}", context_prompt)
 
 
-async def compute_score(data_source, solution_str, ground_truth, extra_info):
-    judge_model = extra_info.get("judge_model", "gpt-5-mini")
-
-    question = extra_info["question"]
-    tools = extra_info["tools"]
-    rubric = render_rubric(
-        DEFAULT_RUBRIC, f"The available tools are listed here: {json.dumps(tools, ensure_ascii=False)}"
-    )
-    message_lists = [
-        [
-            {"role": "system", "content": rubric},
-            {"role": "user", "content": question},
-            {"role": "assistant", "content": solution_str},
+async def compute_score(message_lists, rubric, judge_model="gpt-5-mini"):
+    try:
+        trajectory_scores = await aruler(
+            message_lists, rubric=rubric, judge_model=judge_model, debug=False, extra_params={"timeout": 120}
+        )
+    except Exception as e:
+        print(f"Error in function aruler: {e}")
+        trajectory_scores = [
+            TrajectoryScore(
+                trajectory_id="traj_{:03d}".format(idx), explanation="The trajectory score error.", score=0.0
+            )
+            for idx in range(len(message_lists))
         ]
-    ]
-    return await aruler(message_lists, rubric=rubric, judge_model=judge_model, debug=True)
+    return torch.tensor([trajectory_score.score for trajectory_score in trajectory_scores])
 
 
 @run_async_in_new_loop
 async def compute_score_batch(data_sources, solution_strs, ground_truths, extra_infos):
-    futures = [
-        compute_score(data_source, solution_str, ground_truth, extra_info)
-        for data_source, solution_str, ground_truth, extra_info in zip(
-            data_sources, solution_strs, ground_truths, extra_infos, strict=True
-        )
-    ]
+    rubric = ""
+    judge_model = None
+    message_lists = []
+    for _data_source, solution_str, _ground_truth, extra_info in zip(
+        data_sources, solution_strs, ground_truths, extra_infos, strict=True
+    ):
+        tools = extra_info["tools"]
+        if not rubric:
+            rubric = render_rubric(
+                DEFAULT_RUBRIC, f"The available tools are listed here: {json.dumps(tools, ensure_ascii=False)}"
+            )
+        if not judge_model:
+            judge_model = "gpt-5-mini" if not extra_info.get("judge_model", None) else extra_info["judge_model"]
 
-    return await asyncio.gather(*futures)
+        message_lists.append(
+            [
+                {"role": "user", "content": extra_info["question"]},
+                {"role": "assistant", "content": remove_think_tags(solution_str)},
+            ]
+        )
+
+    futures = [compute_score(message_lists, rubric, judge_model)]
+    results = await asyncio.gather(*futures)
+    flat = list(chain.from_iterable(results))
+    return flat
 
 
 if __name__ == "__main__":
@@ -371,8 +407,6 @@ if __name__ == "__main__":
         """,
     ]
     ground_truths = [None] * 3
-
-    import asyncio
 
     tools = [
         {

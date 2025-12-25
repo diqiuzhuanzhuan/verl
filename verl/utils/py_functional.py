@@ -344,11 +344,15 @@ def run_async_in_new_loop(func):
                 result = coro
 
         finally:
-            new_loop.close()
             try:
-                asyncio.set_event_loop(prev_loop)
-            except Exception:
-                pass
+                new_loop.close()
+            except Exception as e:
+                print(f"Error closing event loop: {e}")
+
+                try:
+                    asyncio.set_event_loop(prev_loop)
+                except Exception:
+                    pass
 
         return result
 
