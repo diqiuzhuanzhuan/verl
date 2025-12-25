@@ -19,6 +19,7 @@ Preprocess the query dataset to parquet format
 
 import argparse
 import asyncio
+import json
 import os
 from typing import Any
 
@@ -114,7 +115,7 @@ if __name__ == "__main__":
                     "split": split,
                     "index": idx,
                     "question": question,
-                    "tools": openai_format_tools,
+                    "tools": json.dumps(openai_format_tools["tools"], ensure_ascii=False),
                     "judge_model": args.judge_model,
                     "need_tools_kwargs": False,
                     "interaction_kwargs": {
