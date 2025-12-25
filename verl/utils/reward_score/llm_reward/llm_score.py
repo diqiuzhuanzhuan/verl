@@ -28,7 +28,6 @@ import asyncio
 import json
 import os
 import re
-from itertools import chain
 from pathlib import Path
 from textwrap import dedent
 
@@ -162,7 +161,6 @@ async def aruler(
         {"role": "system", "content": judge_prompt},
         {"role": "user", "content": user_text},
     ]
-    print(messages)
 
     client = AsyncOpenAI(
         api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
@@ -171,7 +169,7 @@ async def aruler(
         response = await client.chat.completions.parse(
             model=judge_model,
             messages=messages,
-            max_completion_tokens=4096,
+            max_completion_tokens=8192,
             response_format=Response,
             **extra_params if extra_params else {},
         )
@@ -198,7 +196,6 @@ async def aruler(
     content = first_choice.message.content or "{}"  # type: ignore[attr-defined]
     parsed = Response.model_validate_json(content)
     assert len(parsed.scores) == len(message_lists)
-    print("score: ", parsed.scores)
     return parsed.scores
 
 
@@ -360,6 +357,40 @@ async def compute_score(message_lists, rubric, judge_model="gpt-5-mini"):
     return torch.tensor([trajectory_score.score for trajectory_score in trajectory_scores])
 
 
+async def compute_score_mini_batch(message_lists, rubric, judge_model="gpt-5-mini"):
+    """Score message_lists in smaller sub-batches to avoid hitting model token/size limits.
+
+    Args:
+        message_lists: list of trajectories (each a list of message dicts).
+        rubric: rendered rubric string.
+        judge_model: model name to use for judging.
+
+    Returns:
+        A 1-D torch.Tensor of scores in the same order as message_lists.
+    """
+    # Heuristic max sub-batch size; can be tuned based on model/token limits.
+    max_sub_batch = int(os.getenv("RULER_MAX_SUB_BATCH", "8"))
+
+    if not message_lists:
+        return torch.tensor([], dtype=torch.float32)
+
+    parts = []
+    for i in range(0, len(message_lists), max_sub_batch):
+        chunk = message_lists[i : i + max_sub_batch]
+        try:
+            scores = await compute_score(chunk, rubric, judge_model)
+        except Exception as e:
+            print(f"Error scoring mini-batch starting at {i}: {e}")
+            # fallback: zeros for this chunk
+            scores = torch.zeros(len(chunk), dtype=torch.float32)
+        parts.append(scores)
+
+    if not parts:
+        return torch.tensor([], dtype=torch.float32)
+
+    return torch.cat(parts)
+
+
 @run_async_in_new_loop
 async def compute_score_batch(data_sources, solution_strs, ground_truths, extra_infos):
     rubric = ""
@@ -383,10 +414,11 @@ async def compute_score_batch(data_sources, solution_strs, ground_truths, extra_
             ]
         )
 
-    futures = [compute_score(message_lists, rubric, judge_model)]
-    results = await asyncio.gather(*futures)
-    flat = list(chain.from_iterable(results))
-    return flat
+    results = await asyncio.gather(compute_score_mini_batch(message_lists, rubric, judge_model))
+    flat = []
+    for tensor in results:
+        flat.extend(tensor.tolist())
+    return torch.tensor(flat)
 
 
 if __name__ == "__main__":
