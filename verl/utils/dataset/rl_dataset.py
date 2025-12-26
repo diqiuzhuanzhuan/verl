@@ -142,6 +142,14 @@ class RLHFDataset(Dataset):
         self._download()
         self._read_files_and_tokenize()
 
+    def _get_chat_template_kwargs(self) -> dict:
+        """Return chat-template kwargs with tool schemas merged in if needed."""
+
+        kwargs = dict(**self.apply_chat_template_kwargs)
+        if self.tool_schemas is not None and "tools" not in kwargs:
+            kwargs["tools"] = self.tool_schemas
+        return kwargs
+
     def _download(self, use_origin_parquet=False):
         from verl.utils.fs import copy_to_local
 
@@ -188,9 +196,7 @@ class RLHFDataset(Dataset):
                     try:
                         messages = self._build_messages(doc)
                         # pass tool schemas if available so the processor can format prompts
-                        apply_kwargs = dict(**self.apply_chat_template_kwargs)
-                        if self.tool_schemas is not None:
-                            apply_kwargs["tools"] = self.tool_schemas
+                        apply_kwargs = self._get_chat_template_kwargs()
 
                         raw_prompt = self.processor.apply_chat_template(
                             messages, add_generation_prompt=True, tokenize=False, **apply_kwargs
@@ -233,9 +239,7 @@ class RLHFDataset(Dataset):
 
                 def doc2len(doc) -> int:
                     try:
-                        apply_kwargs = dict(**self.apply_chat_template_kwargs)
-                        if self.tool_schemas is not None:
-                            apply_kwargs["tools"] = self.tool_schemas
+                        apply_kwargs = self._get_chat_template_kwargs()
 
                         return len(
                             tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True, **apply_kwargs)
@@ -299,7 +303,7 @@ class RLHFDataset(Dataset):
             from verl.utils.dataset.vision_utils import process_image, process_video
 
             raw_prompt = self.processor.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
+                messages, add_generation_prompt=True, tokenize=False, **self._get_chat_template_kwargs()
             )
             multi_modal_data = {}
 
@@ -361,7 +365,7 @@ class RLHFDataset(Dataset):
                     "models like GLM can copy chat_template.jinja from instruct models"
                 )
             raw_prompt = self.tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
+                messages, add_generation_prompt=True, tokenize=False, **self._get_chat_template_kwargs()
             )
             model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
             input_ids = model_inputs.pop("input_ids")
