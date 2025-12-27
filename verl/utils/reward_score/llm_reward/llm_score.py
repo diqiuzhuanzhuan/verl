@@ -32,11 +32,12 @@ from pathlib import Path
 from textwrap import dedent
 
 import torch
-from openai import AsyncOpenAI, OpenAI
+from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion
 from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
 from pydantic import BaseModel, Field
 from rich import print
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from verl.utils.py_functional import run_async_in_new_loop
 
@@ -66,6 +67,7 @@ with open(Path(__file__).parent / "template" / Path("function_call_default_rubri
 DEFAULT_RUBRIC = __BASE_DEFAULT_RUBRIC
 
 
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
 async def aruler(
     message_lists: list[list[ChatCompletionMessageParam]],
     judge_model: str = "gpt-5-mini",
@@ -162,174 +164,42 @@ async def aruler(
         {"role": "user", "content": user_text},
     ]
 
-    client = AsyncOpenAI(
+    response = None
+    async with AsyncOpenAI(
         api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    )
-    try:
-        response = await client.chat.completions.parse(
-            model=judge_model,
-            messages=messages,
-            max_completion_tokens=8192,
-            response_format=Response,
-            **extra_params if extra_params else {},
-        )
-    except Exception as e:
-        print(f"Error in RULER: {e}")
-        if debug:
-            print(f"Messages: {messages}")
-
-    assert isinstance(response, ChatCompletion)
-
-    if len(response.choices) == 0:
-        raise ValueError(f"No choices in response: {response}")
-    first_choice = response.choices[0]
-
-    if debug:
-        raw_content = first_choice.message.content or "{}"  # type: ignore[attr-defined]
+    ) as client:
         try:
-            print("\n[RULER] Pretty-printed LLM choice JSON:")
-            print(json.loads(raw_content))
-        except json.JSONDecodeError as e:
-            print(f"[RULER] Could not parse choice content as JSON: {e}")
-            print(f"[RULER] Raw choice content: {raw_content}")
+            response = await client.chat.completions.parse(
+                model=judge_model,
+                messages=messages,
+                max_completion_tokens=8192,
+                response_format=Response,
+                **extra_params if extra_params else {},
+            )
+        except Exception as e:
+            print(f"Error in RULER: {e}")
+            if debug:
+                print(f"Messages: {messages}")
+            raise
 
-    content = first_choice.message.content or "{}"  # type: ignore[attr-defined]
-    parsed = Response.model_validate_json(content)
-    assert len(parsed.scores) == len(message_lists)
-    return parsed.scores
+        assert isinstance(response, ChatCompletion)
 
+        if len(response.choices) == 0:
+            raise ValueError(f"No choices in response: {response}")
+        first_choice = response.choices[0]
 
-def ruler(
-    message_lists: list[list[ChatCompletionMessageParam]],
-    judge_model: str = "gpt-5-mini",
-    extra_params: dict | None = None,
-    rubric: str = DEFAULT_RUBRIC,
-    *,
-    debug: bool = False,
-) -> list[TrajectoryScore]:
-    """Core RULER implementation that scores a list of message trajectories.
-
-    This is the low-level API that works with raw message lists. For integration
-    with ART's training loop, use `ruler_score_group` instead.
-
-    RULER works by:
-    1. Extracting common prefixes from trajectories to save tokens
-    2. Passing all trajectories to an LLM judge for relative scoring
-    3. Returning scores that can be used directly as rewards in GRPO
-
-    The key insight is that relative scores within a group are all that matters
-    for GRPO, which normalizes them anyway.
-
-    Args:
-        message_lists: A list where each item is a list of ChatCompletionMessageParam
-            dicts representing a single trajectory.
-        judge_model: The model to use for judging. Common options:
-            - "openai/gpt-4o-mini" - Fast and cost-effective
-            - "openai/o3" - Most capable but expensive (default)
-            - "anthropic/claude-3-opus-20240229" - Alternative judge
-        extra_params: Additional parameters to pass to openai completion.
-            Can include temperature, max_tokens, etc.
-        rubric: The grading rubric. The default rubric works well for most tasks.
-        debug: If True, pretty-print the judge's reasoning to help understand scores.
-
-    Returns:
-        A list of TrajectoryScore objects with scores and explanations.
-
-    Example:
-        >>> message_lists = [
-        ...     [{"role": "system", "content": "You are helpful."},
-        ...      {"role": "user", "content": "What is 2+2?"},
-        ...      {"role": "assistant", "content": "4"}],
-        ...     [{"role": "system", "content": "You are helpful."},
-        ...      {"role": "user", "content": "What is 2+2?"},
-        ...      {"role": "assistant", "content": "I don't know"}]
-        ... ]
-        >>> scores = await ruler(message_lists, debug=True)
-        >>> print(scores[0].score)  # Higher score for correct answer
-        0.9
-    """
-
-    # Short-circuit for the trivial case
-    if not message_lists:
-        return []
-
-    # Determine the length of the longest common prefix shared by all trajectories.
-    # This optimization reduces token usage when all trajectories share the same
-    # system prompt or initial messages.
-    message_lists = message_lists
-    common_prefix_len = 0
-    for idx, msg in enumerate(message_lists[0]):
-        if all(len(msg_list) > idx and msg_list[idx] == msg for msg_list in message_lists):
-            common_prefix_len += 1
-        else:
-            break
-
-    # If there is a non-empty common prefix, serialize it once to save tokens.
-    user_text = ""
-    if common_prefix_len > 0:
-        common_prefix_messages = message_lists[0][:common_prefix_len]
-        user_text += "<context>\n" + json.dumps(common_prefix_messages) + "\n</context>\n\n"
-
-    # Serialize each trajectory (minus the common prefix) for the judge.
-    serialized_trajectories: list[str] = []
-    for idx, full_messages in enumerate(message_lists, start=1):
-        trimmed_messages = full_messages[common_prefix_len:]
-        serialized_trajectories.append(f'<trajectory id="{idx}">\n' + json.dumps(trimmed_messages) + "\n</trajectory>")
-
-    user_text += "Trajectories:\n\n" + "\n\n".join(serialized_trajectories)
-
-    judge_prompt = dedent(
-        f"""
-        All of the trajectories below have been given the same goal. 
-        Your job is to consider each of them and give them a score between 0 and 1. 
-        Take into consideration your best judgement of the agent's goal.
-
-        Grading standards:
-        {rubric}
-        """
-    )
-
-    messages = [
-        {"role": "system", "content": judge_prompt},
-        {"role": "user", "content": user_text},
-    ]
-
-    client = OpenAI(
-        api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    )
-
-    try:
-        response = client.chat.completions.parse(
-            model=judge_model,
-            messages=messages,
-            max_completion_tokens=4096,
-            response_format=Response,
-            **extra_params if extra_params else {},
-        )
-    except Exception as e:
-        print(f"Error in RULER: {e}")
         if debug:
-            print(f"Messages: {messages}")
+            raw_content = first_choice.message.content or "{}"  # type: ignore[attr-defined]
+            try:
+                print("\n[RULER] Pretty-printed LLM choice JSON:")
+                print(json.loads(raw_content))
+            except json.JSONDecodeError as e:
+                print(f"[RULER] Could not parse choice content as JSON: {e}")
+                print(f"[RULER] Raw choice content: {raw_content}")
 
-    assert isinstance(response, ChatCompletion)
-
-    if len(response.choices) == 0:
-        raise ValueError(f"No choices in response: {response}")
-    first_choice = response.choices[0]
-
-    if debug:
-        raw_content = first_choice.message.content or "{}"  # type: ignore[attr-defined]
-        try:
-            print("\n[RULER] Pretty-printed LLM choice JSON:")
-            print(json.loads(raw_content))
-        except json.JSONDecodeError as e:
-            print(f"[RULER] Could not parse choice content as JSON: {e}")
-            print(f"[RULER] Raw choice content: {raw_content}")
-
-    content = first_choice.message.content or "{}"  # type: ignore[attr-defined]
-    parsed = Response.model_validate_json(content)
-    assert len(parsed.scores) == len(message_lists)
-
+        content = first_choice.message.content or "{}"  # type: ignore[attr-defined]
+        parsed = Response.model_validate_json(content)
+        assert len(parsed.scores) == len(message_lists)
     return parsed.scores
 
 
@@ -344,7 +214,11 @@ def render_rubric(template: str, context_prompt: str) -> str:
 async def compute_score(message_lists, rubric, judge_model="gpt-5-mini"):
     try:
         trajectory_scores = await aruler(
-            message_lists, rubric=rubric, judge_model=judge_model, debug=False, extra_params={"timeout": 120}
+            message_lists,
+            rubric=rubric,
+            judge_model=judge_model,
+            debug=False,
+            extra_params={"timeout": 60 * 10},
         )
     except Exception as e:
         print(f"Error in function aruler: {e}")
@@ -354,6 +228,7 @@ async def compute_score(message_lists, rubric, judge_model="gpt-5-mini"):
             )
             for idx in range(len(message_lists))
         ]
+
     return torch.tensor([trajectory_score.score for trajectory_score in trajectory_scores])
 
 
@@ -374,21 +249,25 @@ async def compute_score_mini_batch(message_lists, rubric, judge_model="gpt-5-min
     if not message_lists:
         return torch.tensor([], dtype=torch.float32)
 
-    parts = []
-    for i in range(0, len(message_lists), max_sub_batch):
-        chunk = message_lists[i : i + max_sub_batch]
-        try:
-            scores = await compute_score(chunk, rubric, judge_model)
-        except Exception as e:
-            print(f"Error scoring mini-batch starting at {i}: {e}")
-            # fallback: zeros for this chunk
-            scores = torch.zeros(len(chunk), dtype=torch.float32)
-        parts.append(scores)
+    semaphore = asyncio.Semaphore(int(os.getenv("RULER_CONCURRENT_CHUNKS", "5")))
 
-    if not parts:
-        return torch.tensor([], dtype=torch.float32)
+    async def run_chunk(chunk):
+        async with semaphore:
+            try:
+                return await compute_score(chunk, rubric, judge_model)
+            except Exception as exc:
+                print(f"chunk error: {exc}")
+                return torch.zeros(len(chunk), dtype=torch.float32)
 
-    return torch.cat(parts)
+    tasks = [
+        asyncio.create_task(run_chunk(chunk))
+        for chunk in (message_lists[i : i + max_sub_batch] for i in range(0, len(message_lists), max_sub_batch))
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    if not results:
+        return torch.tensor([0.0] * len(message_lists), dtype=torch.float32)
+
+    return results
 
 
 @run_async_in_new_loop
@@ -414,7 +293,7 @@ async def compute_score_batch(data_sources, solution_strs, ground_truths, extra_
             ]
         )
 
-    results = await asyncio.gather(compute_score_mini_batch(message_lists, rubric, judge_model))
+    results = await compute_score_mini_batch(message_lists, rubric, judge_model)
     flat = []
     for tensor in results:
         flat.extend(tensor.tolist())
