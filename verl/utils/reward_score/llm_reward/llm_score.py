@@ -172,7 +172,7 @@ async def aruler(
             response = await client.chat.completions.parse(
                 model=judge_model,
                 messages=messages,
-                max_completion_tokens=os.getenv("RULER_MAX_COMPLETION_TOKENS", 10240),
+                max_completion_tokens=int(os.getenv("RULER_MAX_COMPLETION_TOKENS", 10240)),
                 response_format=Response,
                 **extra_params if extra_params else {},
             )
