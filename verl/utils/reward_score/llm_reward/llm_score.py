@@ -151,9 +151,8 @@ async def aruler(
     judge_prompt = dedent(
         f"""
         All of the trajectories below have been given the same goal. 
-        Your job is to consider each of them and give them a score between 0 and 1. 
+        Your job is to consider each of them and give them a score.
         Take into consideration your best judgement of the agent's goal.
-
         Grading standards:
         {rubric}
         """
