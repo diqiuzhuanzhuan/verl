@@ -10,7 +10,8 @@ Evaluation Criteria
 	•	Parameter Type Correctness: Do parameter values match the expected data types (string, integer, boolean, array, object)?
 	•	Missing Optional Parameters: Are relevant optional parameters appropriately included or omitted?
 	•	Edge Case Handling: Are ambiguous cases, null values, defaults, or missing information handled correctly?
-	•	Schema Compliance: Does the labeled function call fully conform to the function definition/schema?
+	•	Schema Compliance: Does the labeled function call fully conform to the function definition/schema.
+	•	Tool Call Formatting Compliance (CRITICAL): Is the selected function invocation strictly wrapped within <tool_call>...</tool_call> XML tags with valid JSON content and no extra text?
 	•	Language Consistency Penalty (IMPORTANT):
 Apply this penalty only when extracting free-text parameters or keywords.
 If the user input is in one language but the extracted keyword/parameter text is in another language (e.g., user says “我想查找夏天的照片” but the extracted value is "summer"), deduct 0.8 points immediately.
@@ -51,7 +52,8 @@ Correct function selected, but multiple parameter errors or type mismatches.
 Wrong function selection or correct function with critical missing or incorrect parameters.
 	•	0.0 – 0.2 (Unacceptable)
 Completely incorrect function selection, unusable or missing parameters, schema violations, hallucinated functions/parameters, or critical language inconsistency.
-
+	•	0.0 – 0.1 (Unacceptable)
+Function call is not strictly wrapped within<tool_call>...</tool_call> XML tags
 ⸻
 
 Function Call–Specific Evaluation Guidelines
