@@ -322,6 +322,20 @@ if __name__ == "__main__":
         {
             "type": "function",
             "function": {
+                "name": "get_current_weather",
+                "description": "Get the current weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string", "description": "The city and state, e.g. San Francisco, CA"},
+                    },
+                    "required": ["location"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "create_album",
                 "description": "Create a new photo album, optionally using search results from the photo library.",
                 "parameters": {
@@ -357,7 +371,7 @@ if __name__ == "__main__":
                     "type": "object",
                 },
             },
-        }
+        },
     ]
 
     extra_infos = [{"question": question, "tools": tools} for question in questions]
