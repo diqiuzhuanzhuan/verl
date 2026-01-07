@@ -13,9 +13,24 @@ Evaluation Criteria
 	•	Schema Compliance: Does the labeled function call fully conform to the function definition/schema.
 	•	Tool Call Formatting Compliance (CRITICAL): Is the selected function invocation strictly wrapped within <tool_call>...</tool_call> XML tags with valid JSON content and no extra text?
 	•	Language Consistency Penalty (IMPORTANT):
-Apply this penalty only when extracting free-text parameters or keywords.
-If the user input is in one language but the extracted keyword/parameter text is in another language (e.g., user says “我想查找夏天的照片” but the extracted value is "summer"), deduct 0.8 points immediately.
-Do not apply this penalty when the parameter value is defined as an English enum option.
+Apply this penalty only in the following situations:
+
+1. Free-text parameter or keyword extraction:
+   If the user input is in one language but the extracted free-text
+   keyword or parameter value is in another language
+   (e.g., user says “我想查找夏天的照片” but the extracted value is "summer"),
+   deduct 0.8 points immediately.
+
+2. Non-tool responses (no function call invoked):
+   If the assistant does not invoke any tool, the natural language
+   response must be in the same language as the user input.
+   If the response language differs from the user input language,
+   deduct 0.8 points immediately.
+
+Do NOT apply this penalty when:
+- The parameter value is defined as an English enum option
+- The function schema explicitly requires English identifiers
+
 	•	Hallucination Penalty:
 If the assistant outputs a non-existent function or parameter, deduct 0.8 points immediately.
 
@@ -35,7 +50,7 @@ Output Format
 
 {
   "score": 0.0,
-  "explanation": "Detailed explanation of why this score was assigned. Include: (1) Whether the correct function was selected, (2) Assessment of each parameter's accuracy and completeness with specific examples (e.g., 'parameter X was correctly extracted as 123', 'parameter Y is missing but required'), (3) Any type mismatches or schema violations, (4) How ambiguous cases were handled, (5) References to specific data points (e.g., 'sample_id: 456', 'conversation turn 3')."
+  "explanation": "Detailed explanation of why this score was assigned. Include: (1) Whether the correct function was selected, (2) Assessment of each parameter's accuracy and completeness with specific examples (e.g., 'parameter X was correctly extracted as 123', 'parameter Y is missing but required'), (3) Any type mismatches or schema violations, (4) How ambiguous cases were handled, (5) Whether language consistency is violated?"
 }
 
 
@@ -66,10 +81,4 @@ When evaluating, pay special attention to:
 	•	Null vs empty vs missing: Are these distinctions handled appropriately?
 	•	Tool existence: Does the function exist in the provided tools list?
 	•	Multi-step calls: If multiple function calls are required, are all identified and evaluated?
-
-⸻
-
-If you want, I can also:
-	•	Convert this into a rubric table
-	•	Provide a scoring formula (e.g., weighted dimensions)
-	•	Add automatic penalty logic in pseudocode for implementation
+	•	Language Consistency: Is the language of the response aligned with that of the input query?
