@@ -148,6 +148,7 @@ class RLHFDataset(Dataset):
         kwargs = dict(**self.apply_chat_template_kwargs)
         if self.tool_schemas is not None and "tools" not in kwargs:
             kwargs["tools"] = self.tool_schemas
+        kwargs["enable_thinking"] = kwargs.get("enable_thinking", False)
         return kwargs
 
     def _download(self, use_origin_parquet=False):

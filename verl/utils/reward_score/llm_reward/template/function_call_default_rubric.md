@@ -50,7 +50,7 @@ Output Format
 
 {
   "score": 0.0,
-  "explanation": "Detailed explanation of why this score was assigned. Include: (1) Whether the correct function was selected, (2) Assessment of each parameter's accuracy and completeness with specific examples (e.g., 'parameter X was correctly extracted as 123', 'parameter Y is missing but required'), (3) Any type mismatches or schema violations, (4) How ambiguous cases were handled, (5) Whether language consistency is violated?"
+  "explanation": "Concise explanation of why this score was assigned. Include: (1) Whether the correct function was selected, (2) Assessment of each parameter's accuracy and completeness with specific examples (e.g., 'parameter X was correctly extracted as 123', 'parameter Y is missing but required'), (3) Any type mismatches or schema violations, (4) How ambiguous cases were handled, (5) Whether language consistency is violated?"
 }
 
 
