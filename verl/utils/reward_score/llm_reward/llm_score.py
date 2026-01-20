@@ -173,6 +173,7 @@ async def aruler(
                 messages=messages,
                 max_completion_tokens=int(os.getenv("RULER_MAX_COMPLETION_TOKENS", 10240)),
                 response_format=Response,
+                temperature=0.0,
                 **extra_params if extra_params else {},
             )
         except Exception as e:
@@ -227,7 +228,6 @@ async def compute_score(message_lists, rubric, judge_model="gpt-5-mini"):
             )
             for idx in range(len(message_lists))
         ]
-
     return torch.tensor([trajectory_score.score for trajectory_score in trajectory_scores])
 
 
@@ -300,9 +300,21 @@ async def compute_score_batch(data_sources, solution_strs, ground_truths, extra_
 
 
 if __name__ == "__main__":
-    data_sources = [""] * 3
-    questions = ["旧金山今天的天气怎么样？", "播放下成龙的电影", "帮我查下天气？"]
+    from verl.tools.utils.tool_registry import initialize_tools_from_config
+
+    tool_config_path = "examples/sglang_multiturn/config/tool_config/ugreen_mcp_tool_config.yaml"
+
+    tool_list = initialize_tools_from_config(tool_config_path)
+    # match ToolAgentLoop behaviour: model_dump to plain dicts
+    tool_schemas = [tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list]
+    data_sources = [""] * 4
+    questions = ["Loop play New Century", "旧金山今天的天气怎么样？", "播放下成龙的电影", "帮我查下天气？"]
     solution_strs = [
+        """
+        <tool_call>
+        {"name": "video_play", "arguments": {"title": "New Century"}}
+        </tool_call>
+        """,
         """
         <tool_call>
         {"name": "get_current_weather", "arguments": {"location": "San Francisco"}}
@@ -316,7 +328,7 @@ if __name__ == "__main__":
         好的，请问您想要查询哪个城市的天气呢？
         """,
     ]
-    ground_truths = [None] * 3
+    ground_truths = [None] * len(questions)
 
     tools = [
         {
@@ -374,5 +386,5 @@ if __name__ == "__main__":
         },
     ]
 
-    extra_infos = [{"question": question, "tools": tools} for question in questions]
+    extra_infos = [{"question": question, "tools": tool_schemas} for question in questions]
     print(compute_score_batch(data_sources, solution_strs, ground_truths, extra_infos))
