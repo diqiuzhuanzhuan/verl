@@ -80,7 +80,7 @@ if __name__ == "__main__":
 
     local_dataset_path = args.local_dataset_path
 
-    data_source = "ugreen/tool_query"
+    data_source = "ugreen-ai/tool-query"
 
     if local_dataset_path is not None:
         dataset = datasets.load_dataset(local_dataset_path, "default")
