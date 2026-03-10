@@ -130,3 +130,5 @@ logs
 log
 outputs
 .history
+models
+data

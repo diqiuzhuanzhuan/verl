@@ -307,12 +307,19 @@ if __name__ == "__main__":
     tool_list = initialize_tools_from_config(tool_config_path)
     # match ToolAgentLoop behaviour: model_dump to plain dicts
     tool_schemas = [tool.tool_schema.model_dump(exclude_unset=True, exclude_none=True) for tool in tool_list]
-    data_sources = [""] * 4
-    questions = ["Loop play New Century", "旧金山今天的天气怎么样？", "播放下成龙的电影", "帮我查下天气？"]
+    print(tool_schemas)
+    questions = [
+        "华为商场",
+        "旧金山今天的天气怎么样？",
+        "播放下成龙的电影",
+        "帮我查下天气？",
+        "可以把led灯的灯光调亮20%吗?",
+    ]
+    data_sources = [""] * len(questions)
     solution_strs = [
         """
         <tool_call>
-        {"name": "video_play", "arguments": {"title": "New Century"}}
+        {"name": "search_photos", "arguments": {"keyword": "华为商场"}}
         </tool_call>
         """,
         """
@@ -326,6 +333,9 @@ if __name__ == "__main__":
         </tool_call>""",
         """
         好的，请问您想要查询哪个城市的天气呢？
+        """,
+        """
+        具体是哪个灯光呢？
         """,
     ]
     ground_truths = [None] * len(questions)
