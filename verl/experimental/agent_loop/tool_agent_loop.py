@@ -28,7 +28,7 @@ from verl.experimental.agent_loop.agent_loop import (
     register,
 )
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
-from verl.experimental.agent_loop.utils import build_gpt_oss_tool_response_text
+from verl.experimental.agent_loop.utils import build_gpt_oss_tool_response_text, build_qwen3_5_tool_response_text
 from verl.interactions.base import BaseInteraction
 from verl.interactions.utils.interaction_registry import initialize_interactions_from_config
 from verl.tools.schemas import ToolResponse
@@ -198,6 +198,8 @@ class ToolAgentLoop(AgentLoopBase):
             extra_fields=agent_data.extra_fields,
         )
         output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
+        output.extra_fields.update({"messages": agent_data.messages})
+        output.extra_fields.update({"tools": self.tool_schemas})
         return output
 
     async def _handle_pending_state(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
@@ -261,6 +263,17 @@ class ToolAgentLoop(AgentLoopBase):
         # Extract tool calls
         _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids)
 
+        if agent_data.tool_calls:
+            add_messages.append(
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        tool_call.model_dump(exclude=["name", "arguments"]) for tool_call in agent_data.tool_calls
+                    ],
+                }
+            )
+            agent_data.messages.extend(add_messages)
+
         # Handle interaction if needed
         if self.interaction_config_file:
             assistant_message = await self.loop.run_in_executor(
@@ -275,6 +288,11 @@ class ToolAgentLoop(AgentLoopBase):
         elif self.interaction_config_file:
             return AgentState.INTERACTING
         else:
+            assistant_message = await self.loop.run_in_executor(
+                None, lambda: self.tokenizer.decode(agent_data.response_ids, skip_special_tokens=True)
+            )
+            add_messages.append({"role": "assistant", "content": assistant_message})
+            agent_data.messages.extend(add_messages)
             return AgentState.TERMINATED
 
     async def _handle_processing_tools_state(self, agent_data: AgentData) -> AgentState:
@@ -290,7 +308,6 @@ class ToolAgentLoop(AgentLoopBase):
 
         with simple_timer("tool_calls", agent_data.metrics):
             responses = await asyncio.gather(*tasks)
-
         # Process tool responses and update multi_modal_data
         # Removed: agent_data.new_images_this_turn = []
         for tool_response, tool_reward, _ in responses:
@@ -310,10 +327,14 @@ class ToolAgentLoop(AgentLoopBase):
                     content.append({"type": "video"})
                 if tool_response.text:
                     content.append({"type": "text", "text": tool_response.text})
-                message = {"role": "tool", "content": content}
+                message = {"role": "tool", "content": content, "tool_call_id": tool_response.tool_id}
             else:
                 # Text-only content
-                message = {"role": "tool", "content": tool_response.text or ""}
+                message = {
+                    "role": "tool",
+                    "content": tool_response.text or "",
+                    "tool_call_id": tool_response.tool_call_id,
+                }
 
             add_messages.append(message)
 
@@ -346,6 +367,12 @@ class ToolAgentLoop(AgentLoopBase):
         if self.tool_parser_name == "gpt-oss":
             logger.info("manually format tool responses for gpt-oss")
             tool_response_text = build_gpt_oss_tool_response_text(add_messages, tool_call_names)
+            response_ids = await self.loop.run_in_executor(
+                None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
+            )
+        elif self.tool_parser_name == "qwen3_coder":
+            logger.info("manually format tool responses for qwen3_5")
+            tool_response_text = build_qwen3_5_tool_response_text(add_messages)
             response_ids = await self.loop.run_in_executor(
                 None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
             )
@@ -464,6 +491,7 @@ class ToolAgentLoop(AgentLoopBase):
                 attr_value = getattr(tool_execution_response, attr_name)
                 if attr_value is not None:
                     tool_response_kwargs[attr_name] = attr_value
+        tool_response_kwargs["tool_call_id"] = tool_call.id
 
         return ToolResponse(**tool_response_kwargs), tool_reward, res
 

@@ -106,3 +106,27 @@ def build_gpt_oss_tool_response_text(messages: list[dict[str, Any]], tool_call_n
         formatted = format_gpt_oss_tool_response_manually(tool_msg["content"], actual_tool_name)
         tool_response_texts.append(formatted)
     return add_generation_prompt_for_gpt_oss("".join(tool_response_texts))
+
+
+def build_qwen3_5_tool_response_text(messages: list[dict[str, Any]]) -> str:
+    """Build Qwen3.5 tool response text by manually formatting the tool responses.
+
+    Qwen3.5's chat template checks that at least one real user message (non-tool-response)
+    exists in the conversation. When apply_chat_template is called incrementally with only
+    tool role messages, this check fails. We bypass it by formatting directly.
+
+    The expected format from the Qwen3.5 chat template for tool messages is:
+        <|im_start|>user
+        <tool_response>
+        {content}
+        </tool_response><|im_end|>
+        <|im_start|>assistant
+    """
+    parts = []
+    for i, msg in enumerate(messages):
+        content = msg["content"] if isinstance(msg["content"], str) else str(msg["content"])
+        if i == 0:
+            parts.append("<|im_start|>user")
+        parts.append(f"\n<tool_response>\n{content}\n</tool_response>")
+    parts.append("<|im_end|>\n<|im_start|>assistant\n")
+    return "".join(parts)

@@ -141,10 +141,41 @@ def _ulysses_flash_attention_forward(
         torch.distributed.all_gather(position_ids_list, position_ids, group=get_ulysses_sequence_parallel_group())
         position_ids = torch.concat(position_ids_list, dim=-1)
 
+        full_seq_len = query_states.size(1)
+        batch_size = query_states.size(0)
+        cu_seq_lens = torch.arange(
+            0,
+            (batch_size + 1) * full_seq_len,
+            full_seq_len,
+            dtype=torch.int32,
+            device=query_states.device,
+        )
+        kwargs["cu_seq_lens_q"] = cu_seq_lens
+        kwargs["cu_seq_lens_k"] = cu_seq_lens
+        kwargs["max_length_q"] = full_seq_len
+        kwargs["max_length_k"] = full_seq_len
+
     # (bsz, seq_len, n_head/n, head_dim)
     query_length = query_states.size(1)
+
+    # M-RoPE models (e.g. Qwen3.5) use 3D position_ids with shape (3, bsz, seqlen).
+    # _flash_attention_forward / prepare_fa_kwargs_from_position_ids expects 2D (bsz, seqlen).
+    # Passing 3D position_ids causes reshape(-1) to produce a (3*seqlen,) tensor, resulting
+    # in cu_seqlens that exceed the actual sequence length and a CUDA illegal memory access.
+    # Use only the first dimension (text/time positions) for the varlen boundary detection.
+    fa_position_ids = position_ids[0] if position_ids is not None and position_ids.ndim == 3 else position_ids
+    if ulysses_sp_size > 1 and position_ids is not None:
+        fa_position_ids = None
+
     attn_output = _flash_attention_forward(
-        query_states, key_states, value_states, attention_mask, query_length, *args, position_ids=position_ids, **kwargs
+        query_states,
+        key_states,
+        value_states,
+        attention_mask,
+        query_length,
+        *args,
+        position_ids=fa_position_ids,
+        **kwargs,
     )
 
     ########## AlltoAll for Ulysses ##########
@@ -259,6 +290,11 @@ def patch_forward_with_backends(
         forward_with_triton_backend_function = forward_with_triton_backend
     elif model.config.model_type in ["qwen3_vl", "qwen3_vl_moe"]:
         from verl.models.transformers.qwen3_vl import forward_with_torch_backend, forward_with_triton_backend
+
+        forward_with_torch_backend_function = forward_with_torch_backend
+        forward_with_triton_backend_function = forward_with_triton_backend
+    elif model.config.model_type == "qwen3_5":
+        from verl.models.transformers.qwen3_5 import forward_with_torch_backend, forward_with_triton_backend
 
         forward_with_torch_backend_function = forward_with_torch_backend
         forward_with_triton_backend_function = forward_with_triton_backend
@@ -436,6 +472,22 @@ def apply_monkey_patch(
         if ulysses_sp_size > 1:
             patch_vlm_for_ulysses_input_slicing(Qwen3VLTextModel)
             patch_vlm_for_ulysses_input_slicing(Qwen3VLMoeTextModel)
+
+    elif model.config.model_type == "qwen3_5":
+        # Step 1: patch model forward for PPO compatibility
+        from transformers.models.qwen3_5.modeling_qwen3_5 import (
+            Qwen3_5ForConditionalGeneration,
+            Qwen3_5TextModel,
+        )
+
+        from verl.models.transformers.qwen3_5 import forward_with_normal_backend
+
+        Qwen3_5ForConditionalGeneration.forward = forward_with_normal_backend
+        print(f"Monkey patch {model.__class__.__name__} model forward")
+
+        # Step 2: patch input for multimodal sequence parallelism
+        if ulysses_sp_size > 1:
+            patch_vlm_for_ulysses_input_slicing(Qwen3_5TextModel)
 
     elif model.config.model_type == "glm4v":
         # Step 1: patch model to support image-text mixed data

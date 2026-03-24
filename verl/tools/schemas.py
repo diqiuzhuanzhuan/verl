@@ -108,6 +108,7 @@ class ToolResponse(BaseModel):
     text: str | None = None
     image: list[Any] | None = None
     video: list[Any] | None = None
+    tool_call_id: str | None = None
 
     @model_validator(mode="before")
     @classmethod

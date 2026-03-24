@@ -693,6 +693,12 @@ class AgentLoopWorker:
 
         images = output.multi_modal_data.get("images")
         videos = output.multi_modal_data.get("videos")
+
+        # For pure text inputs, skip the processor.
+        # Processor outputs (e.g. rope_deltas) are sequence-length-dependent and
+        # cannot be torch.cat'd across samples of different lengths.
+        if images is None and videos is None:
+            return multi_modal_inputs
         # split the videos and according metadatas
         if videos is not None:
             videos, video_metadatas = zip(*videos, strict=False)
@@ -727,6 +733,11 @@ class AgentLoopWorker:
 
         image_grid_thw = multi_modal_inputs.get("image_grid_thw")
         video_grid_thw = multi_modal_inputs.get("video_grid_thw")
+
+        # For pure text sequences (no images/video), use standard position ids.
+        # get_rope_index requires mm_token_type_ids which is only available for multimodal inputs.
+        if image_grid_thw is None and video_grid_thw is None:
+            return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
 
         # Model's get_rope_index has been dynamically bind to the processor.
         vision_position_ids, _ = self.processor.get_rope_index(

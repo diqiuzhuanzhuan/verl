@@ -124,7 +124,6 @@ async def aruler(
     # Determine the length of the longest common prefix shared by all trajectories.
     # This optimization reduces token usage when all trajectories share the same
     # system prompt or initial messages.
-    message_lists = message_lists
     common_prefix_len = 0
     for idx, msg in enumerate(message_lists[0]):
         if all(len(msg_list) > idx and msg_list[idx] == msg for msg_list in message_lists):
@@ -270,7 +269,7 @@ async def compute_score_mini_batch(message_lists, rubric, judge_model="gpt-5-min
 
 
 @run_async_in_new_loop
-async def compute_score_batch(data_sources, solution_strs, ground_truths, extra_infos):
+async def compute_score_batch(data_sources, solution_strs, ground_truths, extra_infos, **kwargs):
     rubric = ""
     judge_model = None
     message_lists = []
@@ -284,13 +283,7 @@ async def compute_score_batch(data_sources, solution_strs, ground_truths, extra_
             )
         if not judge_model:
             judge_model = "gpt-5-mini" if not extra_info.get("judge_model", None) else extra_info["judge_model"]
-
-        message_lists.append(
-            [
-                {"role": "user", "content": extra_info["question"]},
-                {"role": "assistant", "content": remove_think_tags(solution_str)},
-            ]
-        )
+        message_lists.append(extra_info["messages"])
 
     results = await compute_score_mini_batch(message_lists, rubric, judge_model)
     flat = []

@@ -261,6 +261,79 @@ def _estimate_qwen3_vit_flop(images_seqlens, config):
     return vit_flops
 
 
+def _estimate_qwen3_5_flops(config, tokens_sum, batch_seqlens, delta_time):
+    # Qwen3_5Config wraps a text_config (same pattern as qwen3_vl)
+    text_config = getattr(config, "text_config", config)
+
+    hidden_size = text_config.hidden_size
+    vocab_size = text_config.vocab_size
+    num_hidden_layers = text_config.num_hidden_layers
+    num_key_value_heads = text_config.num_key_value_heads
+    num_attention_heads = text_config.num_attention_heads
+    intermediate_size = text_config.intermediate_size
+
+    head_dim = getattr(text_config, "head_dim", text_config.hidden_size // text_config.num_attention_heads)
+
+    # GatedDeltaNet (linear attention) dimensions
+    linear_num_key_heads = text_config.linear_num_key_heads
+    linear_num_value_heads = text_config.linear_num_value_heads
+    linear_key_head_dim = text_config.linear_key_head_dim
+    linear_value_head_dim = text_config.linear_value_head_dim
+    key_dim = linear_num_key_heads * linear_key_head_dim
+    value_dim = linear_num_value_heads * linear_value_head_dim
+
+    # Partition layers into full-attention vs linear-attention
+    layer_types = text_config.layer_types
+    full_attn_layers = sum(1 for lt in layer_types if lt == "full_attention")
+    linear_attn_layers = num_hidden_layers - full_attn_layers
+
+    # MLP: gate_proj + up_proj + down_proj (SwiGLU)
+    mlp_N = hidden_size * intermediate_size * 3
+
+    # Full attention linear projections (Qwen3_5Attention):
+    #   q_proj: hidden_size → num_attention_heads * head_dim * 2  (Q + sigmoid output gate, chunked)
+    #   k_proj: hidden_size → num_key_value_heads * head_dim
+    #   v_proj: hidden_size → num_key_value_heads * head_dim
+    #   o_proj: num_attention_heads * head_dim → hidden_size
+    attn_full_linear_N = hidden_size * (
+        num_attention_heads * head_dim * 2  # q_proj (Q + gate)
+        + num_key_value_heads * head_dim  # k_proj
+        + num_key_value_heads * head_dim  # v_proj
+        + num_attention_heads * head_dim  # o_proj
+    )
+
+    # Linear attention projections (Qwen3_5GatedDeltaNet):
+    #   in_proj_qkv: hidden_size → key_dim * 2 + value_dim  (Q, K, V)
+    #   in_proj_z:   hidden_size → value_dim  (output gate)
+    #   out_proj:    value_dim → hidden_size
+    attn_linear_linear_N = hidden_size * (2 * key_dim + 3 * value_dim)
+
+    emd_and_lm_head_N = vocab_size * hidden_size * 2
+
+    # Total dense params across all layers
+    dense_N = (
+        (mlp_N + attn_full_linear_N) * full_attn_layers
+        + (mlp_N + attn_linear_linear_N) * linear_attn_layers
+        + emd_and_lm_head_N
+    )
+    # fwd + bwd flops (6× convention)
+    dense_N_flops = 6 * dense_N * tokens_sum
+
+    # Full attention quadratic FLOPS (causal softmax attention)
+    seqlen_square_sum = sum(s * s for s in batch_seqlens)
+    attn_qkv_flops = 6 * seqlen_square_sum * head_dim * num_attention_heads * full_attn_layers
+
+    # Linear attention state update FLOPS (GatedDeltaNet, O(N)):
+    # Per token per layer: num_k_heads outer products of (head_k_dim × head_v_dim)
+    linear_attn_state_flops = (
+        6 * tokens_sum * linear_num_key_heads * linear_key_head_dim * linear_value_head_dim * linear_attn_layers
+    )
+
+    flops_all_token = dense_N_flops + attn_qkv_flops + linear_attn_state_flops
+    flops_achieved = flops_all_token * (1.0 / delta_time) / 1e12
+    return flops_achieved
+
+
 def _estimate_deepseek_v3_flops(config, tokens_sum, batch_seqlens, delta_time):
     hidden_size = config.hidden_size
     vocab_size = config.vocab_size
@@ -545,6 +618,7 @@ ESTIMATE_FUNC = {
     "qwen3_moe": _estimate_qwen2_moe_flops,
     "qwen3_vl": _estimate_qwen3_vl_flops,
     "qwen3_vl_moe": _estimate_qwen3_vl_moe_flops,
+    "qwen3_5": _estimate_qwen3_5_flops,
     "deepseek_v3": _estimate_deepseek_v3_flops,
     "minicpmv": _estimate_qwen2_flops,
     "minicpmo": _estimate_qwen2_flops,
