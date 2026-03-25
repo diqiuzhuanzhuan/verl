@@ -1,0 +1,74 @@
+# vllm server
+# CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve verl-team/GenRM-CI-Test-1.5B --served_model_name genrm-demo
+
+# sglang server
+# CUDA_VISIBLE_DEVICES=0,1,2,3 python -m sglang_router.launch_server --model-path verl-team/GenRM-CI-Test-1.5B --dp-size 4
+
+set -x
+export RULER_MAX_SUB_BATCH=12
+export RULER_CONCURRENT_CHUNKS=16
+export RULER_MAX_COMPLETION_TOKENS=20480
+model=Qwen/Qwen3.5-4B
+
+tool_config_path=examples/sglang_multiturn/config/tool_config/ugreen_mcp_tool_config.yaml
+CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m verl.trainer.main_ppo \
+    algorithm.adv_estimator=grpo \
+    data.train_files=${HOME}/data/ugreen_function_call/train.parquet \
+    data.val_files=${HOME}/data/ugreen_function_call/test.parquet \
+    data.train_max_samples=4096 \
+    data.return_raw_chat=False \
+    data.train_batch_size=256 \
+    data.max_prompt_length=4096 \
+    data.max_response_length=2048 \
+    data.filter_overlong_prompts=True \
+    +data.apply_chat_template_kwargs.enable_thinking=False \
+    data.truncation='error' \
+    data.tool_config_path=${tool_config_path} \
+    actor_rollout_ref.model.path=${model} \
+    actor_rollout_ref.model.enable_gradient_checkpointing=True \
+    actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.model.use_remove_padding=True \
+    actor_rollout_ref.actor.use_remove_padding=True \
+    actor_rollout_ref.actor.ppo_mini_batch_size=2 \
+    actor_rollout_ref.actor.use_dynamic_bsz=True \
+    actor_rollout_ref.actor.use_kl_loss=True \
+    actor_rollout_ref.actor.kl_loss_coef=0.001 \
+    actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+    actor_rollout_ref.actor.entropy_coeff=0 \
+    actor_rollout_ref.actor.policy_loss.loss_mode=gspo \
+    actor_rollout_ref.actor.fsdp_config.model_dtype=bf16 \
+    actor_rollout_ref.ref.fsdp_config.model_dtype=bf16 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
+    actor_rollout_ref.rollout.agent.default_agent_loop="tool_agent" \
+    actor_rollout_ref.rollout.trace.backend=weave \
+    actor_rollout_ref.rollout.mode=async \
+    actor_rollout_ref.actor.strategy=fsdp2 \
+    +actor_rollout_ref.actor.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap="['Qwen3_5DecoderLayer']"\
+    actor_rollout_ref.rollout.skip_tokenizer_init=False \
+    actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+    actor_rollout_ref.rollout.temperature=1.05 \
+    actor_rollout_ref.rollout.n=5 \
+    actor_rollout_ref.rollout.multi_turn.tool_config_path=${tool_config_path} \
+    actor_rollout_ref.rollout.multi_turn.format=qwen3_coder \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.reasoning-parser="qwen3" \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.load_format="auto" \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.tool_call_parser="qwen3_coder" \
+    actor_rollout_ref.ref.strategy=fsdp2 \
+    +actor_rollout_ref.ref.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap="['Qwen3_5DecoderLayer']"\
+    algorithm.use_kl_in_reward=False \
+    reward_model.reward_manager=batch \
+    custom_reward_function.path=./verl/utils/reward_score/llm_reward/llm_score.py \
+    custom_reward_function.name=compute_score_batch \
+    trainer.critic_warmup=0 \
+    trainer.rollout_data_dir=rollout_data_qwen3_5_4b \
+    trainer.logger='["console","wandb"]' \
+    trainer.project_name='verl_func_rm_example_qwen3_5_4b' \
+    trainer.experiment_name='qwen3_5_4b_function_gen_rm_test_gspo' \
+    trainer.n_gpus_per_node=4 \
+    trainer.val_before_train=False \
+    trainer.nnodes=1 \
+    trainer.save_freq=10 \
+    trainer.test_freq=5 \
+    trainer.total_epochs=20 \
+    trainer.resume_mode='auto'
