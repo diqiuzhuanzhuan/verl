@@ -8,6 +8,7 @@ set -x
 export RULER_MAX_SUB_BATCH=12
 export RULER_CONCURRENT_CHUNKS=16
 export RULER_MAX_COMPLETION_TOKENS=20480
+export RULER_JUDGE_MODEL="gpt-5-mini"
 model=Qwen/Qwen3.5-4B
 
 tool_config_path=examples/sglang_multiturn/config/tool_config/ugreen_mcp_tool_config.yaml

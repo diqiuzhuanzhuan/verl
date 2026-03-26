@@ -262,6 +262,7 @@ async def compute_score_mini_batch(message_lists, rubric, judge_model="gpt-5-min
         for chunk in (message_lists[i : i + max_sub_batch] for i in range(0, len(message_lists), max_sub_batch))
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
+    print(results[0])
     if not results:
         return torch.tensor([0.0] * len(message_lists), dtype=torch.float32)
 
@@ -282,7 +283,11 @@ async def compute_score_batch(data_sources, solution_strs, ground_truths, extra_
                 DEFAULT_RUBRIC, f"The available tools are listed here: {json.dumps(tools, ensure_ascii=False)}"
             )
         if not judge_model:
-            judge_model = "gpt-5-mini" if not extra_info.get("judge_model", None) else extra_info["judge_model"]
+            judge_model = (
+                os.getenv("RULER_JUDGE_MODEL", "gpt-5-mini")
+                if not extra_info.get("judge_model", None)
+                else extra_info["judge_model"]
+            )
         message_lists.append(extra_info["messages"])
 
     results = await compute_score_mini_batch(message_lists, rubric, judge_model)
@@ -332,6 +337,26 @@ if __name__ == "__main__":
         """,
     ]
     ground_truths = [None] * len(questions)
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant.",
+        },
+        {"role": "user", "content": "播放下成龙的电影"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1334fadefg124ffad39e",
+                    "type": "function",
+                    "function": {"name": "video_play", "arguments": '{"title": "chen"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1334fadefg124ffad39e", "content": '{"status": "success", "code": 200}'},
+        {"role": "assistant", "content": "好的，已经为您播放了chen的电影。"},
+    ]
 
     tools = [
         {
@@ -389,5 +414,5 @@ if __name__ == "__main__":
         },
     ]
 
-    extra_infos = [{"question": question, "tools": tool_schemas} for question in questions]
+    extra_infos = [{"question": questions[0], "tools": tool_schemas, "messages": messages}] * 5
     print(compute_score_batch(data_sources, solution_strs, ground_truths, extra_infos))
