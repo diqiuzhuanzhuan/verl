@@ -131,6 +131,36 @@ class RewardLoopWorker:
         )
 
     async def compute_score_batch(self, data: DataProto) -> list[dict]:
+        index = data.non_tensor_batch.get("index")
+        can_run_batch = self.config.reward.custom_reward_function.path is not None and hasattr(
+            self.reward_manager, "run_batch"
+        )
+        can_group_score = index is not None and can_run_batch
+
+        if can_group_score:
+            from collections import defaultdict
+
+            groups: dict = defaultdict(list)
+            for i, idx in enumerate(index):
+                groups[idx].append(i)
+
+            results: list = [None] * len(data)
+            group_positions = []
+            tasks = []
+            for _idx_val, positions in sorted(groups.items(), key=lambda kv: kv[1][0]):
+                group_data = DataProto.concat([data[p : p + 1] for p in positions])
+                tasks.append(asyncio.create_task(self.reward_manager.run_batch(group_data)))
+                group_positions.append(positions)
+
+            group_outputs = await asyncio.gather(*tasks)
+            for positions, group_result in zip(group_positions, group_outputs, strict=False):
+                for pos, result in zip(positions, group_result, strict=False):
+                    results[pos] = result
+            return results
+
+        if can_run_batch:
+            return await self.reward_manager.run_batch(data)
+
         tasks = []
         for i in range(len(data)):
             tasks.append(asyncio.create_task(self.compute_score(data[i : i + 1])))

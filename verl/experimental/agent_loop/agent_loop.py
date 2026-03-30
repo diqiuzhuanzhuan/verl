@@ -524,7 +524,18 @@ class AgentLoopWorker:
                     self._run_agent_loop(sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
                 )
             )
-        outputs = await asyncio.gather(*tasks)
+        outputs = list(await asyncio.gather(*tasks))
+
+        # Batch score all deferred items in a single compute_score_batch call
+        pending_indices = [i for i, out in enumerate(outputs) if "_pending_score_data" in out.extra_fields]
+        if pending_indices and self.reward_loop_worker_handles:
+            pending_data = [outputs[i].extra_fields.pop("_pending_score_data") for i in pending_indices]
+            batch_data = DataProto.concat(pending_data)
+            worker = random.choice(self.reward_loop_worker_handles)
+            results = await worker.compute_score_batch.remote(batch_data)
+            for i, result in zip(pending_indices, results, strict=False):
+                outputs[i].reward_score = result["reward_score"]
+                outputs[i].extra_fields["reward_extra_info"] = result["reward_extra_info"]
 
         output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)
 
@@ -756,7 +767,12 @@ class AgentLoopWorker:
         return position_ids
 
     async def _compute_score(self, output, prompts, responses, attention_mask, input_ids, position_ids, kwargs):
-        """Compute reward score for single sample."""
+        """Compute reward score for single sample.
+
+        Instead of scoring immediately (one-by-one), this method stores the DataProto in
+        output.extra_fields["_pending_score_data"] for deferred batch scoring. The actual
+        scoring call is made in generate_sequences() after all trajectories complete.
+        """
         enable_async_reward = self.reward_loop_worker_handles is not None
 
         if output.reward_score is None and enable_async_reward:
@@ -773,17 +789,21 @@ class AgentLoopWorker:
             non_tensor_batch = {
                 **{k: np.array([v]) for k, v in kwargs.items()},
                 "__num_turns__": np.array([output.num_turns]),
-                "tool_extra_fields": np.array([output.extra_fields], dtype=object),
+                # snapshot extra_fields before _pending_score_data is added
+                "tool_extra_fields": np.array([dict(output.extra_fields)], dtype=object),
             }
 
             data = DataProto(
                 batch=batch,
                 non_tensor_batch=non_tensor_batch,
             )
-            selected_reward_loop_worker_handle = random.choice(self.reward_loop_worker_handles)
-            result = await selected_reward_loop_worker_handle.compute_score.remote(data)
-            output.reward_score = result["reward_score"]
-            output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
+            ##
+            # selected_reward_loop_worker_handle = random.choice(self.reward_loop_worker_handles)
+            # result = await selected_reward_loop_worker_handle.compute_score.remote(data)
+            # output.reward_score = result["reward_score"]
+            # output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
+            # Defer scoring: store data for batch call in generate_sequences()
+            output.extra_fields["_pending_score_data"] = data
 
     def _postprocess(
         self,

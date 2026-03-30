@@ -262,7 +262,6 @@ async def compute_score_mini_batch(message_lists, rubric, judge_model="gpt-5-min
         for chunk in (message_lists[i : i + max_sub_batch] for i in range(0, len(message_lists), max_sub_batch))
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    print(results[0])
     if not results:
         return torch.tensor([0.0] * len(message_lists), dtype=torch.float32)
 
