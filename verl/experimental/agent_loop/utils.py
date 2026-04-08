@@ -127,6 +127,6 @@ def build_qwen3_5_tool_response_text(messages: list[dict[str, Any]]) -> str:
         content = msg["content"] if isinstance(msg["content"], str) else str(msg["content"])
         if i == 0:
             parts.append("<|im_start|>user")
-        parts.append(f"\n<tool_response>\n{content}\n</tool_response>")
+        parts.append(f"\n<tool_response>\n\n{content}\n\n</tool_response>")
     parts.append("<|im_end|>\n<|im_start|>assistant\n")
     return "".join(parts)
