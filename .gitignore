@@ -132,3 +132,4 @@ outputs
 .history
 models
 data
+rollout_data*
