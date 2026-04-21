@@ -847,17 +847,19 @@ class AgentLoopWorker:
             "image_grid_thw": multi_modal_inputs.get("image_grid_thw"),
             "video_grid_thw": multi_modal_inputs.get("video_grid_thw"),
         }
+
+        if not multi_modal_inputs.get("mm_token_type_ids", None):
+            return compute_position_id_with_mask(attention_mask)
+
         # For transformers>=5.3.0, mm_token_type_ids is only used to calculate position ids.
-        if multi_modal_inputs.pop("mm_token_type_ids", None) is not None:
+        if (
+            multi_modal_inputs.pop("mm_token_type_ids", None) is not None
+            or self.processor.__class__.__name__ == "Qwen3VLProcessor"
+        ):
             mm_token_type_ids = torch.zeros_like(input_ids)
             mm_token_type_ids[0][input_ids[0] == self.processor.image_token_id] = 1
             mm_token_type_ids[0][input_ids[0] == self.processor.video_token_id] = 2
             multi_modal_kwargs["mm_token_type_ids"] = mm_token_type_ids
-
-        # For pure text sequences (no images/video), use standard position ids.
-        # get_rope_index requires mm_token_type_ids which is only available for multimodal inputs.
-        if image_grid_thw is None and video_grid_thw is None:
-            return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
 
         # Model's get_rope_index has been dynamically bind to the processor.
         vision_position_ids, _ = self.processor.get_rope_index(
@@ -961,10 +963,16 @@ class AgentLoopWorker:
 
         scores = [input.reward_score for input in inputs]
         if all(score is not None for score in scores):
-            prompt_length = prompt_ids.size(1)
-            response_length = attention_mask[:, prompt_length:].sum(dim=1) - 1
             rm_scores = torch.zeros_like(response_mask, dtype=torch.float32)
-            rm_scores[torch.arange(response_mask.size(0)), response_length] = torch.tensor(scores, dtype=torch.float32)
+            response_mask_bool = response_mask.bool()
+            if (~response_mask_bool.any(dim=1)).any():
+                raise ValueError("response_mask contains an empty response span; cannot place rm_scores.")
+            flipped = torch.flip(response_mask.to(torch.int64), dims=[1])
+            distance_from_end = flipped.argmax(dim=1)
+            last_response_indices = response_mask.shape[1] - 1 - distance_from_end
+            rm_scores[torch.arange(response_mask.size(0)), last_response_indices] = torch.tensor(
+                scores, dtype=torch.float32
+            )
             batch["rm_scores"] = rm_scores
 
         non_tensor_batch = {

@@ -265,14 +265,11 @@ class ToolAgentLoop(AgentLoopBase):
         _, agent_data.tool_calls = await self.tool_parser.extract_tool_calls(agent_data.response_ids, tools)
 
         if agent_data.tool_calls:
-            add_messages.append(
-                {
-                    "role": "assistant",
-                    "tool_calls": [
-                        tool_call.model_dump(exclude=["name", "arguments"]) for tool_call in agent_data.tool_calls
-                    ],
-                }
-            )
+            assistant_tool_call_message = {
+                "role": "assistant",
+                "tool_calls": [tool_call.model_dump() for tool_call in agent_data.tool_calls],
+            }
+            add_messages.append(assistant_tool_call_message)
             agent_data.messages.extend(add_messages)
 
         # Handle interaction if needed
