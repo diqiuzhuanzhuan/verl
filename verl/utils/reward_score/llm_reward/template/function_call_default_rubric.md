@@ -67,7 +67,18 @@ Examples of insufficient intent:
 
 If clarification is required and the assistant clearly asks for the missing information in the user's language, this is the correct behavior.
 
-4. Parameter Faithfulness (CRITICAL)
+4. No Available Tool / Unsupported Action Handling (CRITICAL)
+
+If the user request is clear and actionable, but none of the provided tools can actually perform the requested action, the assistant must NOT call a loosely related tool. Instead, it should clearly state that the requested action cannot be completed with the available tools and, when helpful, suggest a safe manual next step, ask the user to use the appropriate interface, or explain what information/tool would be needed.
+
+This is especially important for high-impact operations or requests that require a capability not represented in the tool list.
+
+Guidelines:
+- If the available tools only provide a related but non-equivalent capability, they should not be treated as completing the requested action.
+- A concise limitation response in the user's language should generally receive a high score (0.85–1.00), provided the assistant does not fabricate completion.
+- If the assistant claims the unsupported action was completed, gives unsupported procedural instructions as if it performed the action, or calls an unrelated/loosely related tool, this should receive a low score.
+
+5. Parameter Faithfulness (CRITICAL)
 
 Parameter values must be faithfully extracted from the user's input without modification, translation, or assumption.
 
@@ -79,20 +90,20 @@ Parameter values must be faithfully extracted from the user's input without modi
 Key example:
 If the user says "播放成龙的电影" and the assistant calls a video search tool with `"title": "Jackie Chan"`, this is a critical parameter error — even if the mock server returns results. The user specified a Chinese name; the assistant must use that exact value.
 
-5. Parameter Completeness
+6. Parameter Completeness
 
 Are all required parameters correctly extracted and provided?
 
 - Missing required parameters is a critical error.
 
-6. Parameter Type Correctness
+7. Parameter Type Correctness
 
 Do parameter values conform to expected data types (string, integer, boolean, array, object)?
 
 - Type mismatches should be penalized even if the value is semantically plausible.
 - If the mock server explicitly returns a type error, treat it as confirmed evidence of a type violation.
 
-7. Optional Parameter Handling
+8. Optional Parameter Handling
 
 Are relevant optional parameters:
 - Included when clearly implied by user intent?
@@ -100,14 +111,14 @@ Are relevant optional parameters:
 
 Over-inference of optional parameters should be penalized.
 
-8. Schema Compliance
+9. Schema Compliance
 
 Does the function call conform to the provided schema?
 
 - Extra fields, missing fields, or incorrect nesting are violations.
 - If the mock server returns a schema validation error, treat it as confirmed evidence of a violation.
 
-9. Language Consistency (IMPORTANT)
+10. Language Consistency (IMPORTANT)
 
 Free-text parameter values must match the language of the user's input.
 
@@ -120,7 +131,7 @@ Do NOT apply this penalty when:
 - The parameter is an enum value defined in English by the schema.
 - The schema explicitly requires English identifiers.
 
-10. Hallucination Penalty
+11. Hallucination Penalty
 
 If the assistant invokes a non-existent function or uses non-existent parameters, apply a strong penalty.
 
@@ -145,6 +156,7 @@ Normalized Scoring Guidelines (0–1)
 - 0.90 – 1.00 (Excellent)
   - Correct function, all parameters accurate and faithful to user input, schema-compliant, and appropriate clarification for underspecified intent.
   - Also use this range when the request is underspecified and the assistant correctly asks for the missing information in the user's language without hallucinating content.
+  - Also use this range when the user requests a clear but unsupported action (for example, NAS shutdown with no shutdown tool available) and the assistant correctly avoids tool calls and explains the limitation in the user's language.
 
 - 0.70 – 0.89 (Good)
   - Correct function with minor issues (e.g., one optional parameter mishandled, minor non-critical deviation), or a good clarification response with slight phrasing issues.
@@ -158,6 +170,7 @@ Normalized Scoring Guidelines (0–1)
 - 0.00 – 0.29 (Unacceptable)
   Any of the following:
   - Tool invoked despite insufficient or ambiguous user intent
+  - Tool invoked for a clear but unsupported action when no available tool can complete the requested task
   - Parameters translated or substituted, causing the real task to fail
   - Critical required parameters missing or confirmed wrong by mock server error
   - Hallucinated functions or parameters
@@ -167,6 +180,7 @@ Normalized Scoring Guidelines (0–1)
 
 - 0.00 – 0.10 (Hard Failure)
   - No tool call made when one was clearly required and the intent was unambiguous
+  - Assistant claims to have completed an unsupported system-level action, such as shutting down the NAS, without a valid tool call capable of doing so
   - Tool invoked when the user query does not justify an actionable decision
   - Assistant fabricates an answer instead of requesting necessary missing information
 
