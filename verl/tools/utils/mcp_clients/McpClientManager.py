@@ -15,6 +15,8 @@
 import asyncio
 import json
 import logging
+import weakref
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 from fastmcp import Client
@@ -25,17 +27,54 @@ from verl.tools.utils.mcp_clients.utils import TokenBucket, mcp2openai
 logger = logging.getLogger(__name__)
 
 
+class MCPClientPool:
+    """A fixed-size pool of connected FastMCP clients for one event loop."""
+
+    def __init__(self, client: Client, pool_size: int):
+        self.client = client
+        self.pool_size = max(pool_size, 1)
+        self._idle_clients: asyncio.LifoQueue[Client] = asyncio.LifoQueue(maxsize=self.pool_size)
+        self._semaphore = asyncio.Semaphore(self.pool_size)
+
+    @asynccontextmanager
+    async def acquire(self):
+        await self._semaphore.acquire()
+        client = None
+        reuse_client = True
+        try:
+            try:
+                client = self._idle_clients.get_nowait()
+            except asyncio.QueueEmpty:
+                client = self.client.new()
+                await client.__aenter__()
+
+            yield client
+        except BaseException:
+            reuse_client = False
+            if client is not None:
+                with suppress(Exception):
+                    await client.close()
+            raise
+        finally:
+            if reuse_client and client is not None:
+                self._idle_clients.put_nowait(client)
+            self._semaphore.release()
+
+
 class MCPClientManager:
     rootServerName = "mcpServers"
     initialized = False
     clients = []
     tool_client_mapping = {}
     rate_limiter = None
+    pool_size = 32
+    client_pools = weakref.WeakKeyDictionary()
 
-    async def initialize(self, config_path, rate_limit: float = 10.0):
+    async def initialize(self, config_path, rate_limit: float = 10.0, pool_size: int = 32):
+        """Initialize the MCP Client Manager and start all clients"""
         if self.initialized:
             return
-        """Initialize the MCP Client Manager and start all clients"""
+        self.pool_size = pool_size
         result = self._load_config(config_path)
         servers = result[self.rootServerName]
         exclude_sse_servers = {self.rootServerName: {}}
@@ -61,14 +100,16 @@ class MCPClientManager:
             await asyncio.sleep(0.1)
 
         client = self.get_client_with_tool_name(tool_name)
-        async with client:
-            return await client.call_tool_mcp(tool_name, parameters)
+        pool = self._get_client_pool(client)
+        async with pool.acquire() as pooled_client:
+            return await pooled_client.call_tool_mcp(tool_name, parameters, timeout=timeout)
 
     async def fetch_tool_schemas(self, tool_selected_list: list[str]) -> list[dict]:
         tool_schemas = []
         for client in self.clients:
-            async with client:
-                tools = await client.list_tools_mcp()
+            fresh_client = client.new()
+            async with fresh_client:
+                tools = await fresh_client.list_tools_mcp()
                 for tool in tools.tools:
                     if not tool_selected_list:
                         self.tool_client_mapping[tool.name] = client
@@ -81,6 +122,17 @@ class MCPClientManager:
 
     def get_client_with_tool_name(self, tool_name: str):
         return self.tool_client_mapping[tool_name]
+
+    def _get_client_pool(self, client: Client) -> MCPClientPool:
+        loop = asyncio.get_running_loop()
+        if loop not in self.client_pools:
+            self.client_pools[loop] = {}
+
+        loop_pools = self.client_pools[loop]
+        client_id = id(client)
+        if client_id not in loop_pools:
+            loop_pools[client_id] = MCPClientPool(client, self.pool_size)
+        return loop_pools[client_id]
 
     def _load_config(self, file: str) -> dict[str, Any]:
         try:

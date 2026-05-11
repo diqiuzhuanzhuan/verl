@@ -39,7 +39,8 @@ async def initialize_mcp_tool(tool_cls, tool_config) -> list:
     tool_list = []
     mcp_servers_config_path = tool_config.mcp.mcp_servers_config_path
     tool_selected_list = tool_config.mcp.tool_selected_list if "tool_selected_list" in tool_config.mcp else None
-    await ClientManager.initialize(mcp_servers_config_path, tool_config.config.rate_limit)
+    client_pool_size = tool_config.config.client_pool_size if "client_pool_size" in tool_config.config else 32
+    await ClientManager.initialize(mcp_servers_config_path, tool_config.config.rate_limit, client_pool_size)
     # Wait for MCP client to be ready
     max_retries = 10
     retry_interval = 2  # seconds

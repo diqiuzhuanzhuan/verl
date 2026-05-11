@@ -198,9 +198,9 @@ class Qwen3XMLToolParser(ToolParser):
 
     def _parse_xml_function_call(
         self, function_call_str: str, tools: Optional[list[OpenAIFunctionToolSchema]]
-    ) -> FunctionCall:
+    ) -> Optional[FunctionCall]:
         def get_arguments_config(func_name: str) -> dict:
-            for config in tools:
+            for config in tools or []:
                 if config.type == "function" and config.function.name == func_name:
                     properties = config.function.parameters.properties
                     return {k: v.model_dump() for k, v in properties.items()}
@@ -282,15 +282,27 @@ class Qwen3XMLToolParser(ToolParser):
                 return param_value
 
         # Extract function name
-        end_index = function_call_str.index(">")
+        end_index = function_call_str.find(">")
+        if end_index < 0:
+            logger.warning("Skipping malformed tool call without a function tag terminator.")
+            return None
         function_name = function_call_str[:end_index]
+        if not function_name or "\n" in function_name or "\r" in function_name or "<" in function_name:
+            logger.warning("Skipping malformed tool call with an invalid function name.")
+            return None
         param_config = get_arguments_config(function_name)
         parameters = function_call_str[end_index + 1 :]
         param_dict = {}
         for match in self.tool_call_parameter_regex.findall(parameters):
             match_text = match[0] if match[0] else match[1]
-            idx = match_text.index(">")
+            idx = match_text.find(">")
+            if idx < 0:
+                logger.warning(f"Skipping malformed parameter in tool call '{function_name}'.")
+                continue
             param_name = match_text[:idx]
+            if not param_name or "\n" in param_name or "\r" in param_name or "<" in param_name:
+                logger.warning(f"Skipping malformed parameter in tool call '{function_name}'.")
+                continue
             param_value = str(match_text[idx + 1 :])
             # Remove prefix and trailing \n
             if param_value.startswith("\n"):
@@ -331,9 +343,18 @@ class Qwen3XMLToolParser(ToolParser):
             if len(function_calls) == 0:
                 return text, []
 
-            tool_calls = [
-                self._parse_xml_function_call(function_call_str, tools) for function_call_str in function_calls
-            ]
+            tool_calls = []
+            for function_call_str in function_calls:
+                try:
+                    tool_call = self._parse_xml_function_call(function_call_str, tools)
+                except Exception as e:
+                    logger.warning(f"Failed to parse XML tool call, skipping it: {e}")
+                    continue
+                if tool_call is not None:
+                    tool_calls.append(tool_call)
+
+            if len(tool_calls) == 0:
+                return text, []
 
             # Extract content before tool calls
             content_index = text.find(self.tool_call_start_token)
