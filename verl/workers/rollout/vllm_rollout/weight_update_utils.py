@@ -18,6 +18,44 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 WeightUpdate = tuple[str, torch.Tensor]
 
 
+def normalize_pixtral_weight_updates(model: torch.nn.Module, weights: list[WeightUpdate]) -> list[WeightUpdate]:
+    """Route HF training weights into vLLM's native Pixtral/Mistral loader.
+
+    Pixtral's custom loader expects its native namespace and does not apply
+    hf_to_vllm_mapper. Its projector norm and patch merger also live outside
+    vision_language_adapter, unlike the HF model's multi_modal_projector.
+    Other models keep their own loader/mapping behavior.
+    """
+    if type(model).__name__ != "PixtralForConditionalGeneration":
+        return weights
+    prefixes = (
+        ("model.multi_modal_projector.patch_merger.", "patch_merger."),
+        ("multi_modal_projector.patch_merger.", "patch_merger."),
+        ("model.multi_modal_projector.norm.", "pre_mm_projector_norm."),
+        ("multi_modal_projector.norm.", "pre_mm_projector_norm."),
+        ("model.multi_modal_projector.", "vision_language_adapter."),
+        ("multi_modal_projector.", "vision_language_adapter."),
+        ("model.vision_tower.", "vision_encoder."),
+        ("vision_tower.", "vision_encoder."),
+        ("model.language_model.", "language_model.model."),
+    )
+    normalized = []
+    for name, tensor in weights:
+        for source, target in prefixes:
+            if name.startswith(source):
+                name = target + name.removeprefix(source)
+                break
+        if name.startswith("vision_language_adapter."):
+            name = name.replace(".linear_1.", ".w_in.").replace(".linear_2.", ".w_out.")
+        elif name.startswith(("language_model.", "model.layers.")):
+            if name.endswith(".weight_scale_inv"):
+                name = name.removesuffix(".weight_scale_inv") + ".weight_scale"
+            elif name.endswith(".activation_scale"):
+                name = name.removesuffix(".activation_scale") + ".input_scale"
+        normalized.append((name, tensor))
+    return normalized
+
+
 def tied_embedding_aliases(model: torch.nn.Module) -> set[str]:
     """Names of tied word-embedding parameters vLLM skips when loading.
 

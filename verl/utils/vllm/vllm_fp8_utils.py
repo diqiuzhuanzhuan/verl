@@ -90,9 +90,13 @@ def _copy_param_subclass_attrs(dst_param, src_param):
     subclass_type = getattr(src_param, "subclass_type", type(src_param))
     if subclass_type is not torch.nn.Parameter:
         dst_param.subclass_type = subclass_type
+        # Staging runs after the generic type-restoration pass. Loaders v2
+        # call methods on the parameter itself, so a type tag is insufficient.
+        dst_param.__class__ = subclass_type
 
 
 _FP8_PRISTINE_ATTR = "_verl_fp8_pristine"
+_FP8_PRISTINE_METADATA_ATTR = "_verl_fp8_pristine_metadata"
 _FP8_LIVE_ATTR = "_verl_fp8_live_params"
 # Names of the params a kernel handed back as a rewritten copy with the checkpoint's shape and dtype.
 _FP8_REPACKED_ATTR = "_verl_fp8_repacked"
@@ -101,7 +105,7 @@ _FP8_REPACKED_ATTR = "_verl_fp8_repacked"
 # scale is named ``w13_weight_scale_inv`` under block quant and
 # ``w13_weight_scale`` otherwise (``self.weight_scale_name``), so both spellings
 # are listed; only the names a layer actually has get recorded.
-_FP8_LINEAR_PARAM_NAMES = ("weight", "weight_scale_inv", "weight_scale")
+_FP8_LINEAR_PARAM_NAMES = ("weight", "weight_scale_inv", "weight_scale", "input_scale")
 _FP8_MOE_PARAM_NAMES = (
     "w13_weight",
     "w2_weight",
@@ -109,6 +113,8 @@ _FP8_MOE_PARAM_NAMES = (
     "w2_weight_scale_inv",
     "w13_weight_scale",
     "w2_weight_scale",
+    "w13_input_scale",
+    "w2_input_scale",
 )
 _FP8_REFIT_PARAM_NAMES = (*_FP8_LINEAR_PARAM_NAMES, *_FP8_MOE_PARAM_NAMES)
 
@@ -212,6 +218,17 @@ def _record_pristine_fp8_layout(layer, params):
 
     if pristine:
         setattr(layer, _FP8_PRISTINE_ATTR, pristine)
+        setattr(
+            layer,
+            _FP8_PRISTINE_METADATA_ATTR,
+            {
+                name: {
+                    **dict(_iter_transferable_param_attrs(params[name])),
+                    "subclass_type": getattr(params[name], "subclass_type", type(params[name])),
+                }
+                for name in pristine
+            },
+        )
 
 
 def _record_same_layout_repacks(layer, old_params):
@@ -238,7 +255,7 @@ def _layer_needs_fp8_staging(layer, pristine) -> bool:
     for name, (shape, dtype) in pristine.items():
         param = getattr(layer, name, None)
         if not isinstance(param, torch.nn.Parameter):
-            continue
+            return True
         if tuple(param.shape) != shape or param.dtype != dtype:
             return True
         # Some backends permute the expert weights while leaving shape and
@@ -296,6 +313,17 @@ def stage_fp8_params_for_loading(model):
         for name, (shape, dtype) in pristine.items():
             param = getattr(layer, name, None)
             if not isinstance(param, torch.nn.Parameter):
+                # Marlin removes static input scales: they are still required
+                # by the checkpoint loader on every refit, then discarded again.
+                device = next(layer.parameters(recurse=False)).device
+                data = torch.empty(shape, dtype=dtype, device=device)
+                data.view(torch.uint8).fill_(0xFF)
+                staged = torch.nn.Parameter(data, requires_grad=False)
+                metadata = getattr(layer, _FP8_PRISTINE_METADATA_ATTR, {}).get(name, {})
+                for attr, value in metadata.items():
+                    setattr(staged, attr, value)
+                staged.__class__ = metadata.get("subclass_type", torch.nn.Parameter)
+                setattr(layer, name, staged)
                 continue
             live[name] = param
             staged = torch.nn.Parameter(_fp8_staging_data(param, shape, dtype), requires_grad=False)

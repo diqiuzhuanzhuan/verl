@@ -18,6 +18,7 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
 import torch
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -208,6 +209,92 @@ def test_split_buffer_updates_routes_registered_buffers():
     assert [name for name, _ in param_updates] == ["model.layers.0.linear.weight"]
     assert [name for name, _ in buffer_updates] == ["model.layers.0.e_score_correction_bias"]
     assert "model.layers.0.e_score_correction_bias" in named_buffers
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("model.vision_tower.patch_conv.weight", "vision_encoder.patch_conv.weight"),
+        ("vision_tower.ln_pre.weight", "vision_encoder.ln_pre.weight"),
+        ("model.multi_modal_projector.norm.weight", "pre_mm_projector_norm.weight"),
+        ("multi_modal_projector.patch_merger.merging_layer.weight", "patch_merger.merging_layer.weight"),
+        ("model.multi_modal_projector.linear_1.weight", "vision_language_adapter.w_in.weight"),
+        ("model.multi_modal_projector.linear_2.weight", "vision_language_adapter.w_out.weight"),
+        (
+            "model.language_model.layers.0.self_attn.q_a_proj.weight_scale_inv",
+            "language_model.model.layers.0.self_attn.q_a_proj.weight_scale",
+        ),
+        (
+            "model.language_model.layers.0.mlp.experts.0.gate_proj.activation_scale",
+            "language_model.model.layers.0.mlp.experts.0.gate_proj.input_scale",
+        ),
+        ("language_model.model.embed_tokens.weight", "language_model.model.embed_tokens.weight"),
+        ("lm_head.weight", "lm_head.weight"),
+    ],
+)
+def test_pixtral_sync_names_are_normalized_once(name, expected):
+    model = type("PixtralForConditionalGeneration", (torch.nn.Module,), {})()
+    tensor = torch.ones(2)
+    normalize = _weight_update_utils.normalize_pixtral_weight_updates
+    result = normalize(model, [(name, tensor)])
+    assert result[0][0] == expected and result[0][1] is tensor
+    assert normalize(model, result)[0][0] == expected
+    other = _ToyModel()
+    assert normalize(other, [(name, tensor)])[0][0] == name
+
+
+def test_pixtral_real_loader_routes_hf_sync_weights_to_each_component(monkeypatch):
+    """Use vLLM's real Pixtral load_weights without allocating a GPU model."""
+    pixtral = pytest.importorskip("vllm.model_executor.models.pixtral")
+    from verl.utils.vllm.vllm_quant_utils import load_quanted_weights
+
+    model = pixtral.PixtralForConditionalGeneration.__new__(pixtral.PixtralForConditionalGeneration)
+    torch.nn.Module.__init__(model)
+    model.vision_encoder = torch.nn.Module()
+    model.vision_encoder.patch_conv = torch.nn.Linear(2, 2, bias=False)
+    model.patch_merger = torch.nn.Module()
+    model.patch_merger.merging_layer = torch.nn.Linear(2, 2, bias=False)
+    model.pre_mm_projector_norm = torch.nn.LayerNorm(2)
+    model.vision_language_adapter = torch.nn.Module()
+    model.vision_language_adapter.w_in = torch.nn.Linear(2, 2, bias=False)
+    model.vision_language_adapter.w_out = torch.nn.Linear(2, 2, bias=False)
+    model.language_model = torch.nn.Module()
+    llm_names = []
+
+    def load_language(weights):
+        llm_names.extend(name for name, _ in weights)
+
+    model.language_model.load_weights = load_language
+    monkeypatch.setattr(_vllm_rollout_utils, "is_quantized_model", lambda _: True)
+    monkeypatch.setattr(_vllm_rollout_utils, "load_quanted_weights", load_quanted_weights)
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    worker.model_runner = _FakeModelRunner(model)
+    worker.model_runner.vllm_config.quant_config = "static_fp8"
+    weights = [
+        ("model.vision_tower.patch_conv.weight", torch.full((2, 2), 2.0)),
+        ("model.multi_modal_projector.patch_merger.merging_layer.weight", torch.full((2, 2), 3.0)),
+        ("model.multi_modal_projector.norm.weight", torch.full((2,), 4.0)),
+        ("model.multi_modal_projector.linear_1.weight", torch.full((2, 2), 5.0)),
+        ("model.multi_modal_projector.linear_2.weight", torch.full((2, 2), 6.0)),
+        ("model.language_model.layers.0.self_attn.q_a_proj.weight_scale_inv", torch.tensor([0.25])),
+        ("model.language_model.layers.0.self_attn.q_a_proj.activation_scale", torch.tensor([0.5])),
+        ("lm_head.weight", torch.ones(2, 2)),
+    ]
+    worker._update_weights(weights, peft_config=None, base_sync_done=True)
+    assert llm_names == [
+        "model.layers.0.self_attn.q_a_proj.weight_scale",
+        "model.layers.0.self_attn.q_a_proj.input_scale",
+        "lm_head.weight",
+    ]
+    targets = [
+        model.vision_encoder.patch_conv.weight,
+        model.patch_merger.merging_layer.weight,
+        model.pre_mm_projector_norm.weight,
+        model.vision_language_adapter.w_in.weight,
+        model.vision_language_adapter.w_out.weight,
+    ]
+    for target, (_, expected) in zip(targets, weights[:5], strict=True):
+        torch.testing.assert_close(target, expected)
 
 
 def test_apply_buffer_updates_copies_buffer_values():

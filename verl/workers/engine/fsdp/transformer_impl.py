@@ -31,6 +31,7 @@ from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConf
 from torch.distributed.tensor import DTensor
 
 import verl.utils.torch_functional as verl_F
+from verl.models.transformers.mistral4 import mistral4_fp8_load_kwargs
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
@@ -61,6 +62,7 @@ from verl.utils.fsdp_utils import (
 )
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
 from verl.utils.py_functional import convert_to_regular_types
+from verl.utils.qat.compressed_tensors import get_static_fp8_training_config
 from verl.utils.seqlen_balancing import ceildiv
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import (
@@ -131,6 +133,7 @@ class FSDPEngine(BaseEngine):
         self.engine_config = engine_config
         self.optimizer_config = optimizer_config
         self.checkpoint_config = checkpoint_config
+        self._rollout_weight_quantizer = None
 
         self.mode = None
 
@@ -270,12 +273,14 @@ class FSDPEngine(BaseEngine):
 
             if self.model_config.model_type == "language_model":
                 auto_class = get_hf_auto_model_class(hf_config=self.model_config.hf_config)
+                training_config = get_static_fp8_training_config(self.model_config.hf_config)
 
                 module = auto_class.from_pretrained(
                     pretrained_model_name_or_path=self.model_config.local_path,
                     torch_dtype=torch_dtype,
-                    config=self.model_config.hf_config,
+                    config=training_config,
                     trust_remote_code=self.model_config.trust_remote_code,
+                    **mistral4_fp8_load_kwargs(training_config),
                 )
 
                 # Strip sub-modules listed in _verl_strip_modules (e.g.
@@ -911,7 +916,16 @@ class FSDPEngine(BaseEngine):
         gen, _ = self.get_per_tensor_param_shard()
         return hf_delta_export(gen, self._delta_shard_snap, self._hf_delta_entry), None
 
-    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
+    def set_rollout_weight_quantizer(self, quantizer) -> None:
+        """Quantize rollout refits while keeping trainable FSDP parameters in high precision."""
+        self._rollout_weight_quantizer = quantizer
+
+    def _quantize_for_rollout(self, weights):
+        if self._rollout_weight_quantizer is None:
+            return weights
+        return self._rollout_weight_quantizer(weights)
+
+    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, quantize_for_rollout=True, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
         # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
@@ -948,7 +962,8 @@ class FSDPEngine(BaseEngine):
                 # restores the un-merged base weights on exit, so tensors must be
                 # materialized while the context is still open (inside the generator).
                 # Materializing after exit silently sends base weights without adapters.
-                return self._merged_lora_per_tensor_param(), None
+                weights = self._merged_lora_per_tensor_param()
+                return self._quantize_for_rollout(weights) if quantize_for_rollout else weights, None
         else:
             params = self.module.state_dict()
 
@@ -973,6 +988,8 @@ class FSDPEngine(BaseEngine):
             per_tensor_param = unfuse_moe_params(per_tensor_param, self.model_config.hf_config.model_type)
 
         peft_config_dict = peft_config.to_dict() if peft_config is not None else None
+        if quantize_for_rollout and not (peft_config is not None and base_sync_done):
+            per_tensor_param = self._quantize_for_rollout(per_tensor_param)
         return per_tensor_param, peft_config_dict
 
     def _merged_lora_per_tensor_param(self):
@@ -1010,7 +1027,7 @@ class FSDPEngine(BaseEngine):
         """Full HF-format weights for the checkpoint 'hf_model' export, with LoRA adapters merged."""
         if self._is_lora:
             return self._merged_lora_per_tensor_param(), None
-        return self.get_per_tensor_param()
+        return self.get_per_tensor_param(quantize_for_rollout=False)
 
     def disable_adapter(self) -> ContextManager:
         return self.module.disable_adapter()

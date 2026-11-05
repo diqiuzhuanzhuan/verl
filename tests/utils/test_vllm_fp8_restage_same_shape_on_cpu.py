@@ -30,6 +30,7 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
 import torch
 from packaging import version
 
@@ -69,6 +70,87 @@ def _identity_process(self, layer):
     """A backend that keeps the checkpoint layout (Triton / vLLM-CUTLASS): replace with the same tensor."""
     for name in ("w13_weight", "w2_weight", "w13_weight_scale_inv", "w2_weight_scale_inv"):
         _fp8().replace_parameter(layer, name, getattr(layer, name))
+
+
+@pytest.mark.parametrize("moe", [False, True])
+def test_static_activation_scales_are_restaged_and_updated_in_live_storage(moe):
+    """Static input scales contract on load; every refit must restore their shard/expert axes."""
+    module = _load_fp8_utils()
+    names = ("w13_input_scale", "w2_input_scale") if moe else ("input_scale",)
+
+    def process(self, layer):
+        for name in names:
+            _fp8().replace_parameter(layer, name, getattr(layer, name).data.max())
+        layer.kernel_inputs = tuple(getattr(layer, name) for name in names)
+
+    with _StubVllmFp8(process) as stub:
+        layer = torch.nn.Module()
+        layer.quant_method = stub.fp8.Fp8MoEMethod()
+        for name in names:
+            setattr(layer, name, torch.nn.Parameter(torch.tensor([0.125, 0.25]), requires_grad=False))
+        wrap = module._make_process_weights_after_loading_for_vllm20(process)
+        with module.patch(f"{_FP8_MODULE}.Fp8MoEMethod.process_weights_after_loading", wrap):
+            layer.quant_method.process_weights_after_loading(layer)
+            live = tuple(getattr(layer, name) for name in names)
+            pointers = tuple(param.data_ptr() for param in live)
+            for value in (0.5, 0.75):
+                staged = module.stage_fp8_params_for_loading(layer)
+                assert staged == [layer]
+                for name in names:
+                    param = getattr(layer, name)
+                    assert param.shape == (2,)
+                    param.data.copy_(torch.tensor([value / 2, value]))
+                module.process_fp8_weights_after_loading(staged)
+                for index, name in enumerate(names):
+                    param = getattr(layer, name)
+                    assert param is live[index]
+                    assert param.data_ptr() == pointers[index]
+                    assert layer.kernel_inputs[index] is param
+                    assert param.item() == value
+
+
+def test_marlin_deleted_input_scale_is_restored_for_each_refit():
+    module = _load_fp8_utils()
+
+    class LoaderParameter(torch.nn.Parameter):
+        def load_merged_column_weight(self, loaded_weight, **kwargs):
+            self.data.copy_(loaded_weight)
+
+    def load_scale(param, value):
+        param.data.copy_(value)
+
+    def process(self, layer):
+        assert layer.input_scale.weight_loader is load_scale
+        assert torch.isfinite(layer.input_scale).all()
+        # Marlin ignores activation calibration and deletes its parameter.
+        layer.input_scale = None
+        del layer.input_scale
+        _fp8().replace_parameter(layer, "weight", layer.weight.data.t().contiguous())
+
+    with _StubVllmFp8(process) as stub:
+        layer = torch.nn.Module()
+        layer.quant_method = stub.fp8.Fp8MoEMethod()
+        layer.weight = LoaderParameter(torch.ones(2, 3), requires_grad=False)
+        layer.input_scale = LoaderParameter(torch.tensor([0.25]), requires_grad=False)
+        layer.input_scale.weight_loader = load_scale
+        wrap = module._make_process_weights_after_loading_for_vllm20(process)
+        with module.patch(f"{_FP8_MODULE}.Fp8MoEMethod.process_weights_after_loading", wrap):
+            layer.quant_method.process_weights_after_loading(layer)
+            live = layer.weight
+            pointer = live.data_ptr()
+            for value in (0.5, 0.75):
+                staged = module.stage_fp8_params_for_loading(layer)
+                assert staged == [layer]
+                assert "input_scale" in dict(layer.named_parameters())
+                assert isinstance(layer.weight, LoaderParameter)
+                assert isinstance(layer.input_scale, LoaderParameter)
+                layer.input_scale.load_merged_column_weight(torch.tensor([value]))
+                layer.weight.load_merged_column_weight(torch.full((2, 3), value))
+                module.process_fp8_weights_after_loading(staged)
+                assert not hasattr(layer, "input_scale")
+                assert layer.weight is live
+                assert layer.weight.data_ptr() == pointer
+                torch.testing.assert_close(layer.weight, torch.full((3, 2), value))
 
 
 def _repacking_process(self, layer):

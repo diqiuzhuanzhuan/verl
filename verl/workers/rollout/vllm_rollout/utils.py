@@ -44,6 +44,7 @@ from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedW
 from verl.workers.rollout.vllm_rollout.weight_update_utils import (
     apply_buffer_updates,
     drop_tied_alias_updates,
+    normalize_pixtral_weight_updates,
     split_buffer_updates,
 )
 
@@ -391,6 +392,7 @@ class vLLMColocateWorkerExtension:
             self.add_lora(lora_request)
             logger.info(f"vLLM load weights, loaded_params: {len(weights)}")
         else:
+            weights = normalize_pixtral_weight_updates(self.model_runner.model, weights)
             param_updates, buffer_updates, named_buffers = split_buffer_updates(self.model_runner.model, weights)
             # Add the FP8 related logic here as sharding manager has been deprecated.
             # Check if FP8 quantization is enabled and apply appropriate weight loading

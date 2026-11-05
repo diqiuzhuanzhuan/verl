@@ -33,6 +33,8 @@ compressors, so every refit ships tensors in the layout the engine loads.
 import json
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from copy import deepcopy
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -48,6 +50,8 @@ __all__ = [
     "SUPPORTED_SCHEMES",
     "CompressedTensorsWeightQuantizer",
     "Fp8ConfigWeightQuantizer",
+    "StaticFp8ConfigWeightQuantizer",
+    "get_static_fp8_training_config",
     "NVFP4PerTokenWeightQuantizer",
     "is_nvfp4_per_token_config",
     "is_nvfp4_per_token_scheme",
@@ -707,6 +711,111 @@ class Fp8ConfigWeightQuantizer(CompressedTensorsWeightQuantizer):
         yield from super().__call__(weights)
 
 
+class StaticFp8ConfigWeightQuantizer:
+    """Refit native per-tensor FP8 weights using checkpoint-calibrated input scales.
+
+    Only scale tensors are read from the local safetensors checkpoint. Weight
+    scales are recomputed after every optimizer update; activation scales remain
+    fixed at their checkpoint calibration. Names are retained so the model's
+    vLLM mapper can translate HF ``activation_scale`` / ``weight_scale_inv``.
+    """
+
+    def __init__(self, fp8_config: Mapping[str, Any], model_path: str):
+        from safetensors import safe_open
+
+        if (
+            fp8_config.get("activation_scheme") != "static"
+            or fp8_config.get("weight_block_size") is not None
+            or fp8_config.get("store_dtype") is not None
+        ):
+            raise NotImplementedError("Static FP8 export requires per-tensor weights without store_dtype")
+        root = Path(model_path)
+        index = root / "model.safetensors.index.json"
+        if index.is_file():
+            filenames = sorted(set(json.loads(index.read_text())["weight_map"].values()))
+        else:
+            filenames = ["model.safetensors"]
+        self.weight_scales: dict[str, str] = {}
+        self.input_scales: dict[str, tuple[str, torch.Tensor]] = {}
+        packed_scales: dict[str, torch.Tensor] = {}
+        for filename in filenames:
+            with safe_open(root / filename, framework="pt", device="cpu") as shard:
+                for name in shard.keys():
+                    # Current official checkpoints use the vLLM-style prefix;
+                    # FSDP exports the Transformers module names.
+                    checkpoint_name = name
+                    if name.startswith("language_model.model."):
+                        name = "model.language_model." + name.removeprefix("language_model.model.")
+                    suffix = name.rsplit(".", 1)[-1]
+                    if suffix in {
+                        "gate_up_proj_scale_inv",
+                        "down_proj_scale_inv",
+                        "gate_up_proj_activation_scale",
+                        "down_proj_activation_scale",
+                    }:
+                        packed_scales[name] = shard.get_tensor(checkpoint_name).clone().float()
+                        continue
+                    if suffix not in {"weight_scale_inv", "weight_scale", "activation_scale", "input_scale"}:
+                        continue
+                    scale = shard.get_tensor(checkpoint_name).clone().float()
+                    if scale.numel() != 1 or not torch.isfinite(scale).all() or not (scale > 0).all():
+                        raise ValueError(f"Static FP8 export requires a finite positive scalar scale: {name}")
+                    module = name.rsplit(".", 1)[0]
+                    if suffix in {"weight_scale_inv", "weight_scale"}:
+                        self.weight_scales[module] = name
+                    else:
+                        self.input_scales[module] = (name, scale)
+        for name, scale in packed_scales.items():
+            if not name.endswith("_scale_inv"):
+                continue
+            weight_name = name.removesuffix("_scale_inv")
+            match = _PACKED_EXPERTS.match(weight_name)
+            if match is None:
+                raise ValueError(f"Unsupported packed static FP8 scale: {name}")
+            input_scale = packed_scales.get(weight_name + "_activation_scale")
+            projections = ("gate_proj", "up_proj") if match["proj"] == "gate_up_proj" else ("down_proj",)
+            # Gate/up can share one scalar per expert ([E, 1, 1]) or
+            # have separate scalars ([E, 2, 1]); down uses [E, 1, 1].
+            if scale.ndim != 3 or scale.shape[1] not in {1, len(projections)} or scale.shape[2] != 1:
+                raise ValueError(f"Expected per-expert/per-projection scalar FP8 scales: {name} {tuple(scale.shape)}")
+            if input_scale is None or input_scale.numel() != scale.shape[0]:
+                raise ValueError(f"Missing per-expert static FP8 input scales for {weight_name}")
+            if not torch.isfinite(scale).all() or not (scale > 0).all():
+                raise ValueError(f"Invalid packed static FP8 weight scales: {name}")
+            if not torch.isfinite(input_scale).all() or not (input_scale > 0).all():
+                raise ValueError(f"Invalid packed static FP8 input scales: {weight_name}")
+            for expert_id, calibrated in enumerate(input_scale.reshape(-1)):
+                for projection in projections:
+                    module = f"{match['prefix']}.{expert_id}.{projection}"
+                    self.weight_scales[module] = module + ".weight_scale_inv"
+                    self.input_scales[module] = (module + ".activation_scale", calibrated.reshape(1).clone())
+        if not self.weight_scales:
+            raise ValueError(f"No per-tensor FP8 weight scales found in {model_path}")
+        missing = self.weight_scales.keys() - self.input_scales.keys()
+        if missing:
+            raise ValueError(f"Missing calibrated static FP8 input scales for {sorted(missing)[:4]}")
+
+    def __call__(self, weights: Iterable[tuple[str, torch.Tensor]]) -> Iterator[tuple[str, torch.Tensor]]:
+        for name, tensor in weights:
+            if tensor.ndim == 3 and _PACKED_EXPERTS.match(name):
+                yield from self(_unpack_experts(name, tensor))
+                continue
+            module = name.removesuffix(".weight")
+            if not name.endswith(".weight") or module not in self.weight_scales:
+                yield name, tensor
+                continue
+            if tensor.ndim != 2 or tensor.dtype not in _HIGH_PRECISION_DTYPES:
+                raise ValueError(f"Static FP8 export needs a high-precision matrix: {name} ({tensor.dtype})")
+            weight = tensor.float()
+            limit = torch.finfo(torch.float8_e4m3fn).max
+            scale = (weight.abs().amax() / limit).clamp_min(torch.finfo(torch.float32).tiny)
+            quantized = (weight / scale).clamp(-limit, limit).to(torch.float8_e4m3fn)
+            yield name, quantized
+            yield self.weight_scales[module], scale.reshape(1)
+            input_name, input_scale = self.input_scales[module]
+            yield input_name, input_scale.to(device=tensor.device)
+
+
 def _as_quantization_config(config: Any) -> Optional[dict[str, Any]]:
     if config is None:
         return None
@@ -715,6 +824,23 @@ def _as_quantization_config(config: Any) -> Optional[dict[str, Any]]:
     if isinstance(config, Mapping):
         return dict(config)
     raise TypeError(f"quantization_config must be a mapping, got {type(config).__name__}")
+
+
+def get_static_fp8_training_config(hf_config: Any) -> Any:
+    """Dequantize static FP8 on load without changing the rollout's native config."""
+    native = getattr(hf_config, "quantization_config", None)
+    if native is None:
+        native = getattr(getattr(hf_config, "text_config", None), "quantization_config", None)
+    quantization = _as_quantization_config(native)
+    if (
+        quantization is None
+        or quantization.get("quant_method") != "fp8"
+        or quantization.get("activation_scheme") != "static"
+    ):
+        return hf_config
+    training_config = deepcopy(hf_config)
+    training_config.quantization_config = {**quantization, "dequantize": True}
+    return training_config
 
 
 def dispatch_rollout_weight_quantizer(
@@ -816,8 +942,18 @@ def dispatch_rollout_weight_quantizer(
         else:
             quantizer = CompressedTensorsWeightQuantizer(quantization_config)
     elif "fp8" in quant_method:
-        qat_modes = {"fp8"}
-        quantizer = Fp8ConfigWeightQuantizer(quantization_config, model_types=model_types)
+        if quantization_config.get("activation_scheme") == "static":
+            if getattr(rollout_config, "name", None) != "vllm":
+                raise ValueError("Native static FP8 weight export is supported only with the vLLM rollout")
+            # ModelOpt's FP8 mode fake-quantizes block weights / dynamic inputs,
+            # which does not match per-tensor weights / calibrated static inputs.
+            if qat_mode is not None:
+                raise ValueError("Native static FP8 rollout does not support QAT")
+            qat_modes = set()
+            quantizer = StaticFp8ConfigWeightQuantizer(quantization_config, model_config.local_path)
+        else:
+            qat_modes = {"fp8"}
+            quantizer = Fp8ConfigWeightQuantizer(quantization_config, model_types=model_types)
     else:
         raise NotImplementedError(
             f"Trainer-side rollout weight export does not support native quant_method={quant_method!r}"

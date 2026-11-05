@@ -104,6 +104,10 @@ def set_default_vllm_quantization_backends(
         quantization_config = quantization_config.to_dict()
     if not isinstance(quantization_config, Mapping) or _is_nvfp4_quantization(quantization_config):
         return
+    # DeepGEMM needs block-scaled weights / dynamic activations. Native static
+    # per-tensor FP8 must use vLLM's hardware-specific backend selection.
+    if quantization_config.get("activation_scheme") == "static":
+        return
     # DeepGEMM is NVIDIA-only; on ROCm, vLLM's automatic selection picks the AITER / Triton kernels.
     if torch.version.hip is not None:
         return
@@ -314,7 +318,8 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
                 param.__class__ = param.orig_type
                 del param.orig_type
 
-    return loaded_params
+    # Legacy custom loaders (including Pixtral) do not report loaded names.
+    return loaded_params if loaded_params is not None else set()
 
 
 def apply_vllm_quant_patches():
