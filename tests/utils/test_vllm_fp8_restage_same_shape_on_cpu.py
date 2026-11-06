@@ -52,6 +52,25 @@ def _fp8():
     return sys.modules[_FP8_MODULE]
 
 
+@pytest.mark.parametrize("shape", [(8, 8), (4, 8)])
+def test_transposed_weight_staging_is_contiguous(shape):
+    module = _load_fp8_utils()
+    layer = torch.nn.Module()
+    weight = torch.arange(shape[0] * shape[1], dtype=torch.float32).reshape(shape)
+    layer.weight = torch.nn.Parameter(weight.t())
+    pristine = {"weight": (shape, torch.float32)}
+    assert module._layer_needs_fp8_staging(layer, pristine)
+    staged = module._fp8_staging_data(layer.weight, shape, torch.float32)
+    assert staged.is_contiguous()
+    assert staged.stride(-1) == 1
+    live_pointer = layer.weight.data_ptr()
+    incoming = torch.arange(staged.numel()).reshape(shape).float()
+    staged.copy_(incoming)
+    module._fold_into_live_param(layer, "weight", layer.weight, staged.t())
+    assert layer.weight.data_ptr() == live_pointer
+    torch.testing.assert_close(layer.weight, incoming.t())
+
+
 def _swap_halves(t: torch.Tensor) -> torch.Tensor:
     """FlashInfer's W13 -> W31 swap: a new tensor with the same shape and dtype."""
     return t.reshape(t.shape[0], 2, t.shape[1] // 2, *t.shape[2:]).flip(1).reshape(t.shape).contiguous()

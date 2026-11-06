@@ -258,6 +258,8 @@ def _layer_needs_fp8_staging(layer, pristine) -> bool:
             return True
         if tuple(param.shape) != shape or param.dtype != dtype:
             return True
+        if not param.is_contiguous():
+            return True
         # Some backends permute the expert weights while leaving shape and
         # dtype untouched, so the comparison above cannot see it. ROCm's AITER
         # MoE sets ``is_shuffled`` on the repacked parameter; the FlashInfer
@@ -284,7 +286,10 @@ def _fp8_staging_data(param, shape, dtype):
     value from a previous refit.
     """
     if param.dtype == dtype and param.numel() == math.prod(shape):
-        return param.data.reshape(shape)
+        # A transpose can retain the checkpoint shape (square projections).
+        # reshape alone then preserves its strides, which FP8 requantization
+        # kernels cannot consume. Keep staging in contiguous checkpoint layout.
+        return param.data.reshape(shape).contiguous()
     staging = torch.empty(shape, dtype=dtype, device=param.device)
     staging.view(torch.uint8).fill_(0xFF)
     return staging
