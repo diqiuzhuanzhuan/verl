@@ -414,6 +414,15 @@ def _estimate_deepseek_v3_flops(config, tokens_sum, batch_seqlens, delta_time):
     return flops_achieved
 
 
+def _estimate_mistral3_flops(config, tokens_sum, batch_seqlens, delta_time):
+    # Mistral Small 4 wraps its MLA/MoE language model in a Mistral3Config.
+    # Count text training FLOPs only; vision encoder/projector FLOPs are not included.
+    text_config = config.text_config
+    if text_config.model_type == "mistral4":
+        return _estimate_deepseek_v3_flops(text_config, tokens_sum, batch_seqlens, delta_time)
+    return _estimate_unknown_flops(config, tokens_sum, batch_seqlens, delta_time)
+
+
 def _estimate_qwen2_moe_flops(config, tokens_sum, batch_seqlens, delta_time):
     hidden_size = config.hidden_size
     vocab_size = config.vocab_size
@@ -691,6 +700,8 @@ ESTIMATE_FUNC = {
     "minicpmv": _estimate_qwen2_flops,
     "minicpmo": _estimate_qwen2_flops,
     "mistral": _estimate_qwen2_flops,
+    "mistral3": _estimate_mistral3_flops,
+    "mistral4": _estimate_deepseek_v3_flops,
     "gemma3_text": _estimate_gemma3_flops,
     "seed_oss": _estimate_qwen2_flops,
     "apertus": _estimate_apertus_flops,

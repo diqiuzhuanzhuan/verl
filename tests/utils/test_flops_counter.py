@@ -27,6 +27,8 @@ VALID_CONFIG_TYPE = {
     "qwen3_5_moe",
     "deepseek_v3",
     "mistral",
+    "mistral3",
+    "mistral4",
     "gemma3_text",
     "apertus",
 }
@@ -177,6 +179,63 @@ CONFIG = {
         # attn flops: 6 * 50331648 * 40 * 128 * 32 = 98956046499840
         # total: 1836871613153280 / 1e12 = 1836.87161315328
         "expected_flops_tuple": (512303699066880 / 1e12, 1787393589903360 / 1e12),
+    },
+    "mistral4": {
+        "config": {  # mistralai/Mistral-Small-4-119B-2603
+            "model_type": "mistral4",
+            "hidden_size": 4096,
+            "vocab_size": 131072,
+            "intermediate_size": 12288,
+            "moe_intermediate_size": 2048,
+            "num_hidden_layers": 36,
+            "first_k_dense_replace": 0,
+            "num_attention_heads": 32,
+            "n_routed_experts": 128,
+            "num_experts_per_tok": 4,
+            "n_shared_experts": 1,
+            "kv_lora_rank": 256,
+            "qk_rope_head_dim": 64,
+            "v_head_dim": 128,
+            "qk_nope_head_dim": 64,
+            "q_lora_rank": 1024,
+        },
+        "batch_seqlens_tuple": ([512, 1024, 2048], [4096, 4096, 4096]),
+        # Text-only MLA + MoE FLOPs; the vision encoder/projector are not included.
+        # MLA projections per layer:
+        # 4096*1024 + 32*128*1024 + 4096*(256+64) + 32*(64+128)*256 + 32*128*4096 = 28049408
+        # Active parameters: 2*131072*4096 + 36*(28049408 + 4096*128 + 3*4096*2048*5) = 6632243200
+        # FLOPs: 6*6632243200*sum(seqlens) + 3*sum(seqlen^2)*36*(128+128)*32
+        "expected_flops_tuple": (147490250686464 / 1e12, 533512247574528 / 1e12),
+    },
+    "mistral3": {
+        "config": {  # mistralai/Mistral-Small-4-119B-2603
+            "model_type": "mistral3",
+            "text_config": {
+                "model_type": "mistral4",
+                "hidden_size": 4096,
+                "vocab_size": 131072,
+                "intermediate_size": 12288,
+                "moe_intermediate_size": 2048,
+                "num_hidden_layers": 36,
+                "first_k_dense_replace": 0,
+                "num_attention_heads": 32,
+                "n_routed_experts": 128,
+                "num_experts_per_tok": 4,
+                "n_shared_experts": 1,
+                "kv_lora_rank": 256,
+                "qk_rope_head_dim": 64,
+                "v_head_dim": 128,
+                "qk_nope_head_dim": 64,
+                "q_lora_rank": 1024,
+            },
+        },
+        "batch_seqlens_tuple": ([512, 1024, 2048], [4096, 4096, 4096]),
+        # Text-only MLA + MoE FLOPs; the vision encoder/projector are not included.
+        # MLA projections per layer:
+        # 4096*1024 + 32*128*1024 + 4096*(256+64) + 32*(64+128)*256 + 32*128*4096 = 28049408
+        # Active parameters: 2*131072*4096 + 36*(28049408 + 4096*128 + 3*4096*2048*5) = 6632243200
+        # FLOPs: 6*6632243200*sum(seqlens) + 3*sum(seqlen^2)*36*(128+128)*32
+        "expected_flops_tuple": (147490250686464 / 1e12, 533512247574528 / 1e12),
     },
     "gemma3_text": {
         "config": {  # Gemma3-12B-IT-TextOnly
@@ -534,6 +593,8 @@ CONFIG = {
         "qwen3_moe",
         "deepseek_v3",
         "mistral",
+        "mistral3",
+        "mistral4",
         "gemma3_text",
         "apertus",
         "gpt_oss",
