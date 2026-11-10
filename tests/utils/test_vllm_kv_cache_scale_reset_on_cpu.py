@@ -146,3 +146,44 @@ def test_refit_post_processing_resets_the_scales(quant_utils):
     quant_utils.process_quanted_weights_after_loading(model, reload_state={})
 
     assert _scales(model["attn"]) == [1.0] * 8
+
+
+def test_mla_decode_weights_refresh_after_dummy_load_and_repeated_refits(quant_utils, monkeypatch):
+    class MLAAttention(nn.Module):
+        """CPU stand-in for vLLM's dequantized kv_b_proj decode matrices."""
+
+        def __init__(self):
+            super().__init__()
+            self.kv_b_proj = nn.Linear(3, 8, bias=False, dtype=torch.bfloat16)
+            self.register_buffer("W_UK_T", torch.zeros(2, 2, 3, dtype=torch.bfloat16))
+            self.register_buffer("W_UV", torch.zeros(2, 3, 2, dtype=torch.bfloat16))
+            self.calls = 0
+
+        def process_weights_after_loading(self, act_dtype):
+            self.calls += 1
+            # Match vLLM's per-head K/V split and in-place replacement.
+            weight = self.kv_b_proj.weight.to(act_dtype).T.reshape(3, 2, 4)
+            key, value = weight.split([2, 2], dim=-1)
+            self.W_UK_T.copy_(key.permute(1, 2, 0))
+            self.W_UV.copy_(value.transpose(0, 1))
+
+    attention = types.ModuleType("vllm.model_executor.layers.attention")
+    attention.MLAAttention = MLAAttention
+    monkeypatch.setitem(sys.modules, attention.__name__, attention)
+    layer = MLAAttention()
+    model = nn.ModuleDict({"language_model": nn.ModuleDict({"attention": layer}), "other": nn.Linear(3, 3)})
+    pointers = (layer.W_UK_T.data_ptr(), layer.W_UV.data_ptr())
+    latent = torch.tensor([1, 2, 3], dtype=torch.bfloat16)
+
+    for step in (1, 2):
+        incoming = (torch.arange(24).reshape(8, 3) * step).to(torch.bfloat16)
+        with torch.no_grad():
+            layer.kv_b_proj.weight.copy_(incoming)
+        # Loading the projection alone leaves decode using the previous matrices.
+        expected = (incoming @ latent).reshape(2, 4)
+        assert not torch.equal(layer.W_UK_T @ latent, expected[:, :2])
+        quant_utils.refresh_mla_attention_weights(model, torch.bfloat16)
+        torch.testing.assert_close(layer.W_UK_T @ latent, expected[:, :2])
+        torch.testing.assert_close(latent @ layer.W_UV, expected[:, 2:])
+        assert (layer.W_UK_T.data_ptr(), layer.W_UV.data_ptr()) == pointers
+    assert layer.calls == 2

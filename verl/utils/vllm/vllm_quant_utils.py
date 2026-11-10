@@ -233,6 +233,26 @@ def prepare_quanted_weights_for_loading(model):
     return reload_state
 
 
+def refresh_mla_attention_weights(model, act_dtype):
+    """Rebuild MLA decode matrices after the projection weights have been refitted.
+
+    MLAAttention derives W_UK_T and W_UV from kv_b_proj during initial loading.
+    Updating that projection alone leaves decode using the old (possibly dummy)
+    matrices. vLLM's hook copies into their existing storage for CUDA graphs.
+    Run only after all buckets and quantization post-processing have completed.
+    """
+    from vllm.model_executor.layers.attention import MLAAttention
+
+    refreshed = 0
+    with torch.inference_mode():
+        for module in model.modules():
+            if isinstance(module, MLAAttention):
+                module.process_weights_after_loading(act_dtype)
+                refreshed += 1
+    if refreshed:
+        logger.info("Refreshed %d MLA attention layers after weight refit", refreshed)
+
+
 def process_quanted_weights_after_loading(model, reload_state):
     """Re-apply the inference layout undone by ``prepare_quanted_weights_for_loading``."""
     reload_state = reload_state or {}

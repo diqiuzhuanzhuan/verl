@@ -353,6 +353,13 @@ class vLLMColocateWorkerExtension:
         elif is_quantized_model(self.model_runner.vllm_config):
             for model, reload_state in quant_reload_states:
                 process_quanted_weights_after_loading(model, reload_state)
+            # MLA decode matrices are derived from kv_b_proj, independently of
+            # the linear/MoE quantization hooks above. Refresh after every refit,
+            # including the first transfer into an engine loaded with dummy weights.
+            from verl.utils.vllm.vllm_quant_utils import refresh_mla_attention_weights
+
+            for model, model_config in self._iter_all_models_with_config():
+                refresh_mla_attention_weights(model, model_config.dtype)
         else:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
