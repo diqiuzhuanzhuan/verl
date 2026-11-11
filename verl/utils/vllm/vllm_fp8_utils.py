@@ -150,10 +150,20 @@ def replace_parameter_preserve_subclass(
     """
     live = getattr(layer, _FP8_LIVE_ATTR, None) or {}
     param = live.get(param_name)
-    if param is not None and new_data is not None:
+    if (
+        param is not None
+        and new_data is not None
+        and new_data.shape == param.shape
+        and new_data.dtype == param.dtype
+    ):
         _fold_into_live_param(layer, param_name, param, new_data)
         del live[param_name]
         return
+
+    # A quant method may replace a parameter more than once. Marlin first
+    # transposes the checkpoint FP8 weight, then packs it into int32. Keep
+    # intermediate layouts in staging until the final layout matches live
+    # storage; the caller validates/folds any remaining parameters afterward.
 
     if new_data is None:
         setattr(layer, param_name, None)

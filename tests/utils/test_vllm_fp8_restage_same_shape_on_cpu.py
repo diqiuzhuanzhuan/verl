@@ -128,6 +128,33 @@ def test_static_activation_scales_are_restaged_and_updated_in_live_storage(moe):
                     assert param.item() == value
 
 
+def test_intermediate_transpose_is_staged_before_final_integer_packing():
+    module = _load_fp8_utils()
+
+    def process(self, layer):
+        _fp8().replace_parameter(layer, "weight", layer.weight.t())
+        packed = layer.weight.float().reshape(1, -1).to(torch.int32)
+        _fp8().replace_parameter(layer, "weight", packed)
+
+    with _StubVllmFp8(process) as stub:
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(torch.ones(2, 3).to(torch.float8_e4m3fn), requires_grad=False)
+        layer.quant_method = stub.fp8.Fp8MoEMethod()
+        wrap = module._make_process_weights_after_loading_for_vllm20(process)
+        with module.patch(f"{_FP8_MODULE}.Fp8MoEMethod.process_weights_after_loading", wrap):
+            layer.quant_method.process_weights_after_loading(layer)
+            live = layer.weight
+            pointer = live.data_ptr()
+            for offset in (0, 8):
+                incoming = (torch.arange(6).reshape(2, 3) + offset).to(torch.float8_e4m3fn)
+                staged = module.stage_fp8_params_for_loading(layer)
+                layer.weight.data.copy_(incoming)
+                module.process_fp8_weights_after_loading(staged)
+                assert layer.weight is live
+                assert layer.weight.data_ptr() == pointer
+                torch.testing.assert_close(layer.weight, incoming.float().t().reshape(1, -1).to(torch.int32))
+
+
 def test_marlin_deleted_input_scale_is_restored_for_each_refit():
     module = _load_fp8_utils()
 
